@@ -1241,8 +1241,38 @@ func (c *Client) DeleteRequiredAction(ctx context.Context, realmName, alias stri
 
 // AuthenticationFlowRepresentation represents a Keycloak authentication flow
 type AuthenticationFlowRepresentation struct {
-	ID    string `json:"id"`
-	Alias string `json:"alias"`
+	ID          *string `json:"id,omitempty"`
+	Alias       *string `json:"alias,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ProviderID  *string `json:"providerId,omitempty"`
+	TopLevel    *bool   `json:"topLevel,omitempty"`
+	BuiltIn     *bool   `json:"builtIn,omitempty"`
+}
+
+// AuthenticationExecutionInfo represents an execution within a flow as returned
+// by GET /authentication/flows/{flowAlias}/executions. This is a flat list with
+// level/index fields indicating the tree structure.
+type AuthenticationExecutionInfo struct {
+	ID                   *string  `json:"id,omitempty"`
+	Requirement          *string  `json:"requirement,omitempty"`
+	DisplayName          *string  `json:"displayName,omitempty"`
+	Alias                *string  `json:"alias,omitempty"`
+	Description          *string  `json:"description,omitempty"`
+	Configurable         *bool    `json:"configurable,omitempty"`
+	AuthenticationFlow   *bool    `json:"authenticationFlow,omitempty"`
+	ProviderID           *string  `json:"providerId,omitempty"`
+	AuthenticationConfig *string  `json:"authenticationConfig,omitempty"`
+	FlowID               *string  `json:"flowId,omitempty"`
+	Level                *int     `json:"level,omitempty"`
+	Index                *int     `json:"index,omitempty"`
+	RequirementChoices   []string `json:"requirementChoices,omitempty"`
+}
+
+// AuthenticatorConfigRepresentation represents an authenticator config
+type AuthenticatorConfigRepresentation struct {
+	ID     *string           `json:"id,omitempty"`
+	Alias  *string           `json:"alias,omitempty"`
+	Config map[string]string `json:"config,omitempty"`
 }
 
 // GetAuthenticationFlows lists all authentication flows in a realm
@@ -1261,11 +1291,86 @@ func (c *Client) GetAuthenticationFlowByAlias(ctx context.Context, realmName, al
 		return nil, err
 	}
 	for i := range flows {
-		if flows[i].Alias == alias {
+		if flows[i].Alias != nil && *flows[i].Alias == alias {
 			return &flows[i], nil
 		}
 	}
 	return nil, fmt.Errorf("authentication flow not found: %s", alias)
+}
+
+// CreateAuthenticationFlow creates a new top-level authentication flow
+func (c *Client) CreateAuthenticationFlow(ctx context.Context, realmName string, flow AuthenticationFlowRepresentation) (string, error) {
+	cfg := DefaultRetryConfig()
+	return WithRetry(ctx, cfg, "CreateAuthenticationFlow", func() (string, error) {
+		return c.Create(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/flows", flow)
+	})
+}
+
+// DeleteAuthenticationFlow deletes an authentication flow by ID
+func (c *Client) DeleteAuthenticationFlow(ctx context.Context, realmName, flowID string) error {
+	return c.Delete(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/flows/"+url.PathEscape(flowID))
+}
+
+// GetFlowExecutions returns the flat execution list for a flow
+func (c *Client) GetFlowExecutions(ctx context.Context, realmName, flowAlias string) ([]AuthenticationExecutionInfo, error) {
+	var executions []AuthenticationExecutionInfo
+	path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/flows/" + url.PathEscape(flowAlias) + "/executions"
+	if err := c.List(ctx, path, nil, &executions); err != nil {
+		return nil, err
+	}
+	return executions, nil
+}
+
+// UpdateFlowExecution updates an execution's requirement within a flow
+func (c *Client) UpdateFlowExecution(ctx context.Context, realmName, flowAlias string, execution AuthenticationExecutionInfo) error {
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "UpdateFlowExecution", func() error {
+		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/flows/" + url.PathEscape(flowAlias) + "/executions"
+		return c.Update(ctx, path, execution)
+	})
+}
+
+// AddFlowExecution adds an authenticator execution to a flow
+func (c *Client) AddFlowExecution(ctx context.Context, realmName, flowAlias, provider string) (string, error) {
+	cfg := DefaultRetryConfig()
+	body := map[string]string{"provider": provider}
+	return WithRetry(ctx, cfg, "AddFlowExecution", func() (string, error) {
+		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/flows/" + url.PathEscape(flowAlias) + "/executions/execution"
+		return c.Create(ctx, path, body)
+	})
+}
+
+// AddFlowSubFlow adds a sub-flow to a parent flow
+func (c *Client) AddFlowSubFlow(ctx context.Context, realmName, parentFlowAlias string, subFlow map[string]interface{}) (string, error) {
+	cfg := DefaultRetryConfig()
+	return WithRetry(ctx, cfg, "AddFlowSubFlow", func() (string, error) {
+		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/flows/" + url.PathEscape(parentFlowAlias) + "/executions/flow"
+		return c.Create(ctx, path, subFlow)
+	})
+}
+
+// DeleteExecution deletes a specific execution by ID
+func (c *Client) DeleteExecution(ctx context.Context, realmName, executionID string) error {
+	return c.Delete(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/executions/"+url.PathEscape(executionID))
+}
+
+// RaiseExecutionPriority moves an execution higher (earlier) in the flow
+func (c *Client) RaiseExecutionPriority(ctx context.Context, realmName, executionID string) error {
+	return c.Post(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/executions/"+url.PathEscape(executionID)+"/raise-priority", nil, nil)
+}
+
+// LowerExecutionPriority moves an execution lower (later) in the flow
+func (c *Client) LowerExecutionPriority(ctx context.Context, realmName, executionID string) error {
+	return c.Post(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/executions/"+url.PathEscape(executionID)+"/lower-priority", nil, nil)
+}
+
+// CreateExecutionConfig sets authenticator config on an execution
+func (c *Client) CreateExecutionConfig(ctx context.Context, realmName, executionID string, config AuthenticatorConfigRepresentation) (string, error) {
+	cfg := DefaultRetryConfig()
+	return WithRetry(ctx, cfg, "CreateExecutionConfig", func() (string, error) {
+		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/executions/" + url.PathEscape(executionID) + "/config"
+		return c.Create(ctx, path, config)
+	})
 }
 
 // ============================================================================
