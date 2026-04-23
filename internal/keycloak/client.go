@@ -558,10 +558,11 @@ func (c *Client) SetPassword(ctx context.Context, realmName, userID, password st
 
 // GroupRepresentation represents a Keycloak group (minimal fields we need)
 type GroupRepresentation struct {
-	ID        *string               `json:"id,omitempty"`
-	Name      *string               `json:"name,omitempty"`
-	Path      *string               `json:"path,omitempty"`
-	SubGroups []GroupRepresentation `json:"subGroups,omitempty"`
+	ID            *string               `json:"id,omitempty"`
+	Name          *string               `json:"name,omitempty"`
+	Path          *string               `json:"path,omitempty"`
+	SubGroupCount *int                  `json:"subGroupCount,omitempty"`
+	SubGroups     []GroupRepresentation `json:"subGroups,omitempty"`
 }
 
 // CreateGroup creates a new group
@@ -587,6 +588,17 @@ func (c *Client) GetGroup(ctx context.Context, realmName, groupID string) (*Grou
 func (c *Client) GetGroups(ctx context.Context, realmName string, params map[string]string) ([]GroupRepresentation, error) {
 	var groups []GroupRepresentation
 	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/groups", params, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+// GetGroupChildren returns direct children of a group.
+// Accepts pagination params (first, max, briefRepresentation, search, exact).
+// Required since Keycloak 23+, where /groups no longer inlines nested subGroups.
+func (c *Client) GetGroupChildren(ctx context.Context, realmName, groupID string, params map[string]string) ([]GroupRepresentation, error) {
+	var groups []GroupRepresentation
+	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/groups/"+url.PathEscape(groupID)+"/children", params, &groups); err != nil {
 		return nil, err
 	}
 	return groups, nil
@@ -1288,6 +1300,12 @@ func (c *Client) GetGroupsRaw(ctx context.Context, realmName string) ([]json.Raw
 // GetGroupRaw gets a group by ID as raw JSON
 func (c *Client) GetGroupRaw(ctx context.Context, realmName, groupID string) (json.RawMessage, error) {
 	return c.GetRaw(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/groups/"+url.PathEscape(groupID))
+}
+
+// GetGroupChildrenRaw gets direct children of a group as raw JSON.
+// Required since Keycloak 23+, where /groups no longer inlines nested subGroups.
+func (c *Client) GetGroupChildrenRaw(ctx context.Context, realmName, groupID string, params map[string]string) ([]json.RawMessage, error) {
+	return c.ListRaw(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/groups/"+url.PathEscape(groupID)+"/children", params)
 }
 
 // GetClientScopesRaw gets all client scopes in a realm as raw JSON
