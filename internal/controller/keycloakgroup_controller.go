@@ -126,14 +126,26 @@ func (r *KeycloakGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		parentGroupID = parentGroup.Status.GroupID
 	}
 
-	// Check if group exists by name
-	existingGroups, err := kc.GetGroups(ctx, realmName, map[string]string{
-		"search": groupDef.Name,
-	})
+	// Check if group exists by name. When a parent is set, scope the lookup to
+	// the parent's children — Keycloak 23+ no longer inlines subGroups in the
+	// realm-wide /groups response, so we cannot rely on a recursive walk.
 	var existingGroup *keycloak.GroupRepresentation
-	if err == nil {
-		// Search through groups (including nested) for exact name match
-		existingGroup = findGroupByNameInList(existingGroups, groupDef.Name, parentGroupID)
+	if parentGroupID != "" {
+		children, err := kc.GetGroupChildren(ctx, realmName, parentGroupID, map[string]string{
+			"search": groupDef.Name,
+			"exact":  "true",
+		})
+		if err == nil {
+			existingGroup = findTopLevelGroupByName(children, groupDef.Name)
+		}
+	} else {
+		existingGroups, err := kc.GetGroups(ctx, realmName, map[string]string{
+			"search": groupDef.Name,
+			"exact":  "true",
+		})
+		if err == nil {
+			existingGroup = findTopLevelGroupByName(existingGroups, groupDef.Name)
+		}
 	}
 
 	var groupID string
@@ -172,24 +184,16 @@ func (r *KeycloakGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return r.updateStatus(ctx, group, true, "Ready", "Group synchronized", groupID)
 }
 
-// findGroupByNameInList searches for a group by name in a list
-func findGroupByNameInList(groups []keycloak.GroupRepresentation, name string, parentID string) *keycloak.GroupRepresentation {
+// findTopLevelGroupByName returns the first group in the list whose name
+// matches exactly. The list is expected to already be scoped to the right
+// parent (either top-level or a specific parent's children); we deliberately
+// do not recurse into SubGroups, which would be incorrect across parents and
+// is empty anyway on Keycloak 23+.
+func findTopLevelGroupByName(groups []keycloak.GroupRepresentation, name string) *keycloak.GroupRepresentation {
 	for i := range groups {
 		g := &groups[i]
 		if g.Name != nil && *g.Name == name {
-			// If no parent specified, return top-level match
-			if parentID == "" {
-				return g
-			}
-			// With parent, check if group is within that parent's subgroups
-			// Note: We've already searched within the parent context
 			return g
-		}
-		// Search subgroups recursively
-		if len(g.SubGroups) > 0 {
-			if found := findGroupByNameInList(g.SubGroups, name, parentID); found != nil {
-				return found
-			}
 		}
 	}
 	return nil

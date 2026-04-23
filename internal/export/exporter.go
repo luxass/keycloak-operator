@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
 
 	"github.com/Hostzero-GmbH/keycloak-operator/internal/keycloak"
 )
+
+// groupChildrenPageSize is the page size used when paging through
+// /admin/realms/{realm}/groups/{id}/children.
+const groupChildrenPageSize = 100
 
 // ExporterOptions configures the export behavior
 type ExporterOptions struct {
@@ -224,6 +229,15 @@ func (e *Exporter) exportClients(ctx context.Context) ([]ExportedResource, error
 	return resources, nil
 }
 
+// groupHeader captures the fields we need from a raw group response to
+// determine its identity and whether it has children to fetch.
+type groupHeader struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	SubGroupCount int               `json:"subGroupCount"`
+	SubGroups     []json.RawMessage `json:"subGroups"`
+}
+
 func (e *Exporter) exportGroups(ctx context.Context) ([]ExportedResource, error) {
 	rawGroups, err := e.client.GetGroupsRaw(ctx, e.opts.Realm)
 	if err != nil {
@@ -232,12 +246,7 @@ func (e *Exporter) exportGroups(ctx context.Context) ([]ExportedResource, error)
 
 	var resources []ExportedResource
 	for _, raw := range rawGroups {
-		// Parse to get group info
-		var group struct {
-			ID        string            `json:"id"`
-			Name      string            `json:"name"`
-			SubGroups []json.RawMessage `json:"subGroups"`
-		}
+		var group groupHeader
 		if err := json.Unmarshal(raw, &group); err != nil {
 			continue
 		}
@@ -249,11 +258,10 @@ func (e *Exporter) exportGroups(ctx context.Context) ([]ExportedResource, error)
 		}
 		resources = append(resources, resource)
 
-		// Recursively export subgroups
-		subgroups := e.exportSubGroups(group.SubGroups, group.Name)
+		children := e.resolveGroupChildren(ctx, group)
+		subgroups := e.exportSubGroups(ctx, children, group.Name)
 		resources = append(resources, subgroups...)
 
-		// Export role mappings for this group
 		if e.filter.ShouldIncludeType(ResourceTypeRoleMappings) {
 			mappings, err := e.exportGroupRoleMappings(ctx, group.ID, group.Name)
 			if err != nil {
@@ -267,13 +275,10 @@ func (e *Exporter) exportGroups(ctx context.Context) ([]ExportedResource, error)
 	return resources, nil
 }
 
-func (e *Exporter) exportSubGroups(subgroups []json.RawMessage, parentName string) []ExportedResource {
+func (e *Exporter) exportSubGroups(ctx context.Context, subgroups []json.RawMessage, parentName string) []ExportedResource {
 	var resources []ExportedResource
 	for _, raw := range subgroups {
-		var group struct {
-			Name      string            `json:"name"`
-			SubGroups []json.RawMessage `json:"subGroups"`
-		}
+		var group groupHeader
 		if err := json.Unmarshal(raw, &group); err != nil {
 			continue
 		}
@@ -285,12 +290,62 @@ func (e *Exporter) exportSubGroups(subgroups []json.RawMessage, parentName strin
 		}
 		resources = append(resources, resource)
 
-		// Recursively export subgroups
 		fullPath := parentName + "/" + group.Name
-		subres := e.exportSubGroups(group.SubGroups, fullPath)
+
+		if e.filter.ShouldIncludeType(ResourceTypeRoleMappings) && group.ID != "" {
+			mappings, err := e.exportGroupRoleMappings(ctx, group.ID, fullPath)
+			if err != nil {
+				e.log.Error(err, "Failed to export role mappings for subgroup", "name", group.Name, "parent", parentName)
+			} else {
+				resources = append(resources, mappings...)
+			}
+		}
+
+		children := e.resolveGroupChildren(ctx, group)
+		subres := e.exportSubGroups(ctx, children, fullPath)
 		resources = append(resources, subres...)
 	}
 	return resources
+}
+
+// resolveGroupChildren returns the direct children of a group. It prefers the
+// inline subGroups field (legacy Keycloak < 23) and falls back to the
+// /groups/{id}/children endpoint when the listing returned an empty subGroups
+// array but a non-zero subGroupCount (Keycloak 23+).
+func (e *Exporter) resolveGroupChildren(ctx context.Context, group groupHeader) []json.RawMessage {
+	if len(group.SubGroups) > 0 {
+		return group.SubGroups
+	}
+	if group.SubGroupCount <= 0 || group.ID == "" {
+		return nil
+	}
+
+	children, err := e.listGroupChildren(ctx, group.ID)
+	if err != nil {
+		e.log.Error(err, "Failed to list group children", "name", group.Name, "id", group.ID)
+		return nil
+	}
+	return children
+}
+
+// listGroupChildren paginates through /admin/realms/{realm}/groups/{id}/children
+// and returns all children as raw JSON.
+func (e *Exporter) listGroupChildren(ctx context.Context, groupID string) ([]json.RawMessage, error) {
+	var all []json.RawMessage
+	for offset := 0; ; offset += groupChildrenPageSize {
+		page, err := e.client.GetGroupChildrenRaw(ctx, e.opts.Realm, groupID, map[string]string{
+			"first":               strconv.Itoa(offset),
+			"max":                 strconv.Itoa(groupChildrenPageSize),
+			"briefRepresentation": "false",
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < groupChildrenPageSize {
+			return all, nil
+		}
+	}
 }
 
 func (e *Exporter) exportUsers(ctx context.Context) ([]ExportedResource, error) {
