@@ -269,6 +269,33 @@ func (c *Client) List(ctx context.Context, path string, params map[string]string
 	return nil
 }
 
+// listAll retrieves all resources using offset-based pagination.
+// The Keycloak Admin API defaults to returning at most 100 results.
+// This helper pages through all results using the "first" and "max" query
+// parameters and returns the full list.
+func listAll[T any](ctx context.Context, c *Client, path string, params map[string]string) ([]T, error) {
+	const pageSize = 100
+	if params == nil {
+		params = make(map[string]string)
+	}
+
+	var all []T
+	for offset := 0; ; offset += pageSize {
+		params["first"] = fmt.Sprintf("%d", offset)
+		params["max"] = fmt.Sprintf("%d", pageSize)
+
+		var page []T
+		if err := c.List(ctx, path, params, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+	}
+	return all, nil
+}
+
 // Post performs a POST request (for non-CRUD operations)
 func (c *Client) Post(ctx context.Context, path string, body interface{}, result interface{}) error {
 	req, err := c.request(ctx)
@@ -410,11 +437,7 @@ func (c *Client) GetClient(ctx context.Context, realmName, clientID string) (*Cl
 
 // GetClients gets all clients in a realm with optional filtering
 func (c *Client) GetClients(ctx context.Context, realmName string, params map[string]string) ([]ClientRepresentation, error) {
-	var clients []ClientRepresentation
-	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/clients", params, &clients); err != nil {
-		return nil, err
-	}
-	return clients, nil
+	return listAll[ClientRepresentation](ctx, c, "/admin/realms/"+url.PathEscape(realmName)+"/clients", params)
 }
 
 // GetClientByClientID finds a client by its clientId field
@@ -507,11 +530,7 @@ func (c *Client) GetUser(ctx context.Context, realmName, userID string) (*UserRe
 
 // GetUsers gets users with optional filtering
 func (c *Client) GetUsers(ctx context.Context, realmName string, params map[string]string) ([]UserRepresentation, error) {
-	var users []UserRepresentation
-	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/users", params, &users); err != nil {
-		return nil, err
-	}
-	return users, nil
+	return listAll[UserRepresentation](ctx, c, "/admin/realms/"+url.PathEscape(realmName)+"/users", params)
 }
 
 // GetUserByUsername finds a user by username
@@ -586,11 +605,7 @@ func (c *Client) GetGroup(ctx context.Context, realmName, groupID string) (*Grou
 
 // GetGroups gets all groups in a realm
 func (c *Client) GetGroups(ctx context.Context, realmName string, params map[string]string) ([]GroupRepresentation, error) {
-	var groups []GroupRepresentation
-	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/groups", params, &groups); err != nil {
-		return nil, err
-	}
-	return groups, nil
+	return listAll[GroupRepresentation](ctx, c, "/admin/realms/"+url.PathEscape(realmName)+"/groups", params)
 }
 
 // GetGroupChildren returns direct children of a group.
@@ -1094,11 +1109,7 @@ type OrganizationDomain struct {
 
 // GetOrganizations gets all organizations in a realm
 func (c *Client) GetOrganizations(ctx context.Context, realmName string) ([]OrganizationRepresentation, error) {
-	var orgs []OrganizationRepresentation
-	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/organizations", nil, &orgs); err != nil {
-		return nil, err
-	}
-	return orgs, nil
+	return listAll[OrganizationRepresentation](ctx, c, "/admin/realms/"+url.PathEscape(realmName)+"/organizations", nil)
 }
 
 // GetOrganization gets an organization by ID
@@ -1339,11 +1350,7 @@ func (c *Client) GetIdentityProviderRaw(ctx context.Context, realmName, alias st
 
 // GetRealmRoles gets all realm roles
 func (c *Client) GetRealmRoles(ctx context.Context, realmName string) ([]RoleRepresentation, error) {
-	var roles []RoleRepresentation
-	if err := c.List(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/roles", nil, &roles); err != nil {
-		return nil, err
-	}
-	return roles, nil
+	return listAll[RoleRepresentation](ctx, c, "/admin/realms/"+url.PathEscape(realmName)+"/roles", nil)
 }
 
 // GetRealmRolesRaw gets all realm roles as raw JSON
