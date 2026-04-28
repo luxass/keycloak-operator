@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,13 @@ import (
 	keycloakv1beta1 "github.com/Hostzero-GmbH/keycloak-operator/api/v1beta1"
 	"github.com/Hostzero-GmbH/keycloak-operator/internal/keycloak"
 )
+
+// errProviderChangeUnsupported is returned when a spec change requests a
+// different top-level providerId than the flow that already exists in
+// Keycloak. Switching the top-level provider type (e.g. basic-flow ->
+// client-flow) is not supported by the Keycloak Admin API; users must pick a
+// new alias instead.
+var errProviderChangeUnsupported = stderrors.New("authentication flow provider change is not supported")
 
 // flowDefinition is the recursive representation of a (sub-)flow that the
 // controller works with after decoding the spec's free-form executions field.
@@ -193,17 +201,29 @@ func (r *KeycloakAuthenticationFlowReconciler) Reconcile(ctx context.Context, re
 	}
 
 	if existingFlowID != "" {
-		// Phase 1: on spec change, delete and recreate
-		if flow.Status.ObservedGeneration != 0 && flow.Status.ObservedGeneration < flow.Generation {
-			log.Info("spec changed, recreating flow", "alias", flow.Spec.Alias)
-			if err := kc.DeleteAuthenticationFlow(ctx, realmName, existingFlowID); err != nil {
-				RecordError(controllerName, "keycloak_api_error")
-				return r.updateStatus(ctx, flow, false, "DeleteFailed", fmt.Sprintf("Failed to delete flow for recreation: %v", err), existingFlowID, realmName)
-			}
-		} else {
+		if flow.Status.ObservedGeneration == 0 || flow.Status.ObservedGeneration >= flow.Generation {
 			log.Info("flow already exists", "alias", flow.Spec.Alias, "id", existingFlowID)
 			return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", existingFlowID, realmName)
 		}
+
+		log.Info("spec changed, updating flow in place", "alias", flow.Spec.Alias)
+		stats, err := r.updateExistingFlow(ctx, kc, realmName, flow, existingFlowID, executions)
+		if err != nil {
+			RecordError(controllerName, "keycloak_api_error")
+			if stderrors.Is(err, errProviderChangeUnsupported) {
+				return r.updateStatus(ctx, flow, false, "ProviderChangeUnsupported", err.Error(), existingFlowID, realmName)
+			}
+			return r.updateStatus(ctx, flow, false, "UpdateFailed", fmt.Sprintf("Failed to update flow: %v", err), existingFlowID, realmName)
+		}
+		log.Info("authentication flow updated in place",
+			"alias", flow.Spec.Alias,
+			"id", existingFlowID,
+			"added", stats.added,
+			"updated", stats.updated,
+			"removed", stats.removed,
+			"reorderedParents", stats.reorderedParents,
+		)
+		return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", existingFlowID, realmName)
 	}
 
 	// Create flow and execution tree
@@ -443,6 +463,325 @@ func matchesIdentifier(e keycloak.AuthenticationExecutionInfo, id execIdentifier
 		return e.AuthenticationFlow != nil && *e.AuthenticationFlow && e.DisplayName != nil && *e.DisplayName == id.name
 	}
 	return e.ProviderID != nil && *e.ProviderID == id.name && (e.AuthenticationFlow == nil || !*e.AuthenticationFlow)
+}
+
+// liveExecution mirrors flowExecution but carries the IDs and metadata
+// required to mutate the live tree (Keycloak execution UUID, config UUID).
+// It is the result of walking the live flow with readLiveTree.
+type liveExecution struct {
+	ID                   string
+	Requirement          string
+	AuthenticationConfig string
+	IsFlow               bool
+	Authenticator        string
+	SubFlowAlias         string
+	Children             []liveExecution
+}
+
+// readLiveTree fetches the live execution tree under flowAlias and returns it
+// in a comparable shape so reconcileChildren can diff it against the spec.
+func (r *KeycloakAuthenticationFlowReconciler) readLiveTree(ctx context.Context, kc *keycloak.Client, realmName, flowAlias string) ([]liveExecution, error) {
+	execs, err := kc.GetFlowExecutions(ctx, realmName, flowAlias)
+	if err != nil {
+		return nil, err
+	}
+	children := filterTopLevelExecutions(execs)
+	out := make([]liveExecution, 0, len(children))
+	for _, e := range children {
+		le := liveExecution{}
+		if e.ID != nil {
+			le.ID = *e.ID
+		}
+		if e.Requirement != nil {
+			le.Requirement = *e.Requirement
+		}
+		if e.AuthenticationConfig != nil {
+			le.AuthenticationConfig = *e.AuthenticationConfig
+		}
+		if e.AuthenticationFlow != nil && *e.AuthenticationFlow {
+			le.IsFlow = true
+			if e.DisplayName != nil {
+				le.SubFlowAlias = *e.DisplayName
+			}
+			if le.SubFlowAlias != "" {
+				kids, err := r.readLiveTree(ctx, kc, realmName, le.SubFlowAlias)
+				if err != nil {
+					return nil, err
+				}
+				le.Children = kids
+			}
+		} else if e.ProviderID != nil {
+			le.Authenticator = *e.ProviderID
+		}
+		out = append(out, le)
+	}
+	return out, nil
+}
+
+// updateStats is a small counter aggregate used to log a one-line summary at
+// the end of a reconcile, so users can see what actually changed.
+type updateStats struct {
+	added, updated, removed, reorderedParents int
+}
+
+// matchExecutions pairs each desired entry with at most one live entry of the
+// same identity (provider id for leaves, alias for sub-flows). Matching is
+// occurrence-based: the i-th desired entry with identity X matches the i-th
+// unmatched live entry with the same identity. Unmatched entries on either
+// side surface as adds (desired) and removes (live). Returned matches[i] is
+// the live index for desired[i], or -1 if desired[i] has no match.
+func matchExecutions(desired []flowExecution, live []liveExecution) (matches []int, matchedLive []bool) {
+	matches = make([]int, len(desired))
+	for i := range matches {
+		matches[i] = -1
+	}
+	matchedLive = make([]bool, len(live))
+	for di, d := range desired {
+		desiredIsFlow := d.SubFlow != nil
+		for li, l := range live {
+			if matchedLive[li] || l.IsFlow != desiredIsFlow {
+				continue
+			}
+			if desiredIsFlow {
+				if d.SubFlow != nil && d.SubFlow.Alias == l.SubFlowAlias {
+					matches[di] = li
+					matchedLive[li] = true
+					break
+				}
+			} else if d.Authenticator == l.Authenticator {
+				matches[di] = li
+				matchedLive[li] = true
+				break
+			}
+		}
+	}
+	return matches, matchedLive
+}
+
+// reconcileChildren brings the live children of parentAlias into the shape
+// described by desired with the minimum set of API calls (Add / Delete /
+// Update / Reorder), recursing into matched sub-flows. The top-level flow
+// itself is never deleted from this path, so flows that are referenced as a
+// sub-flow execution by another flow or as a realm binding override stay
+// usable throughout the update.
+func (r *KeycloakAuthenticationFlowReconciler) reconcileChildren(
+	ctx context.Context, kc *keycloak.Client, realmName, parentAlias string,
+	desired []flowExecution, live []liveExecution, stats *updateStats,
+) error {
+	matches, matchedLive := matchExecutions(desired, live)
+
+	for li, l := range live {
+		if matchedLive[li] || l.ID == "" {
+			continue
+		}
+		if err := kc.DeleteExecution(ctx, realmName, l.ID); err != nil {
+			return fmt.Errorf("removing %s from flow %q: %w", liveIdentity(l), parentAlias, err)
+		}
+		stats.removed++
+	}
+
+	for di, d := range desired {
+		li := matches[di]
+		if li < 0 {
+			continue
+		}
+		l := live[li]
+		if l.Requirement != d.Requirement {
+			if err := r.setExecutionRequirement(ctx, kc, realmName, parentAlias, l.ID, d.Requirement, l.IsFlow); err != nil {
+				return err
+			}
+			stats.updated++
+		}
+		if l.IsFlow {
+			if err := r.reconcileChildren(ctx, kc, realmName, d.SubFlow.Alias, d.children(), l.Children, stats); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := r.reconcileLeafConfig(ctx, kc, realmName, parentAlias, l, d, stats); err != nil {
+			return err
+		}
+	}
+
+	for di, d := range desired {
+		if matches[di] >= 0 {
+			continue
+		}
+		if d.SubFlow != nil {
+			if err := r.addSubFlow(ctx, kc, realmName, parentAlias, d); err != nil {
+				return err
+			}
+		} else {
+			if err := r.addAuthenticatorExecution(ctx, kc, realmName, parentAlias, d); err != nil {
+				return err
+			}
+		}
+		stats.added++
+	}
+
+	if len(desired) > 1 {
+		if err := r.reorderChildren(ctx, kc, realmName, parentAlias, desired); err != nil {
+			return fmt.Errorf("reordering executions in flow %q: %w", parentAlias, err)
+		}
+		stats.reorderedParents++
+	}
+	return nil
+}
+
+// setExecutionRequirement updates an existing execution's requirement via the
+// flow-scoped PUT endpoint. Only ID and Requirement need to be populated;
+// Keycloak ignores the rest of the body.
+func (r *KeycloakAuthenticationFlowReconciler) setExecutionRequirement(
+	ctx context.Context, kc *keycloak.Client, realmName, parentAlias, executionID, requirement string, isFlow bool,
+) error {
+	info := keycloak.AuthenticationExecutionInfo{
+		ID:          &executionID,
+		Requirement: &requirement,
+	}
+	if isFlow {
+		t := true
+		info.AuthenticationFlow = &t
+	}
+	if err := kc.UpdateFlowExecution(ctx, realmName, parentAlias, info); err != nil {
+		return fmt.Errorf("setting requirement on execution in flow %q: %w", parentAlias, err)
+	}
+	return nil
+}
+
+// reconcileLeafConfig converges the authenticatorConfig of a matched leaf
+// execution. Combinations handled: none/none -> no-op; spec/none -> create;
+// none/live -> delete; spec/live equal -> no-op; spec/live differ -> update.
+func (r *KeycloakAuthenticationFlowReconciler) reconcileLeafConfig(
+	ctx context.Context, kc *keycloak.Client, realmName, parentAlias string,
+	l liveExecution, d flowExecution, stats *updateStats,
+) error {
+	hasDesired := len(d.AuthenticatorConfig) > 0
+	hasLive := l.AuthenticationConfig != ""
+
+	switch {
+	case !hasDesired && !hasLive:
+		return nil
+	case hasDesired && !hasLive:
+		configAlias := parentAlias + "-" + d.Authenticator + "-config"
+		config := keycloak.AuthenticatorConfigRepresentation{
+			Alias:  &configAlias,
+			Config: d.AuthenticatorConfig,
+		}
+		if _, err := kc.CreateExecutionConfig(ctx, realmName, l.ID, config); err != nil {
+			return fmt.Errorf("setting config on execution %q in flow %q: %w", d.Authenticator, parentAlias, err)
+		}
+		stats.updated++
+		return nil
+	case !hasDesired && hasLive:
+		if err := kc.DeleteExecutionConfig(ctx, realmName, l.AuthenticationConfig); err != nil {
+			return fmt.Errorf("removing config from execution %q in flow %q: %w", d.Authenticator, parentAlias, err)
+		}
+		stats.updated++
+		return nil
+	default:
+		liveCfg, err := kc.GetExecutionConfig(ctx, realmName, l.AuthenticationConfig)
+		if err != nil {
+			return fmt.Errorf("fetching live config for execution %q: %w", d.Authenticator, err)
+		}
+		if configMapsEqual(liveCfg.Config, d.AuthenticatorConfig) {
+			return nil
+		}
+		configAlias := parentAlias + "-" + d.Authenticator + "-config"
+		if liveCfg.Alias != nil && *liveCfg.Alias != "" {
+			configAlias = *liveCfg.Alias
+		}
+		update := keycloak.AuthenticatorConfigRepresentation{
+			ID:     &l.AuthenticationConfig,
+			Alias:  &configAlias,
+			Config: d.AuthenticatorConfig,
+		}
+		if err := kc.UpdateExecutionConfig(ctx, realmName, l.AuthenticationConfig, update); err != nil {
+			return fmt.Errorf("updating config on execution %q in flow %q: %w", d.Authenticator, parentAlias, err)
+		}
+		stats.updated++
+		return nil
+	}
+}
+
+func configMapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// liveIdentity returns a short human-readable identifier for a live execution
+// for use in log and error messages.
+func liveIdentity(l liveExecution) string {
+	if l.IsFlow {
+		return fmt.Sprintf("sub-flow %q", l.SubFlowAlias)
+	}
+	return fmt.Sprintf("authenticator %q", l.Authenticator)
+}
+
+// updateExistingFlow converges a flow that already exists in Keycloak with
+// the desired spec without deleting and recreating it. This path keeps the
+// top-level flow ID stable, which is necessary for flows referenced as a
+// sub-flow execution by another flow or as a realm binding override.
+func (r *KeycloakAuthenticationFlowReconciler) updateExistingFlow(
+	ctx context.Context, kc *keycloak.Client, realmName string,
+	flow *keycloakv1beta1.KeycloakAuthenticationFlow, existingFlowID string, executions []flowExecution,
+) (*updateStats, error) {
+	flows, err := kc.GetAuthenticationFlows(ctx, realmName)
+	if err != nil {
+		return nil, fmt.Errorf("fetching live flow %q: %w", flow.Spec.Alias, err)
+	}
+	var live *keycloak.AuthenticationFlowRepresentation
+	for i := range flows {
+		if flows[i].ID != nil && *flows[i].ID == existingFlowID {
+			live = &flows[i]
+			break
+		}
+	}
+	if live == nil {
+		return nil, fmt.Errorf("flow %q (%s) not found in realm %s", flow.Spec.Alias, existingFlowID, realmName)
+	}
+
+	if live.ProviderID != nil && *live.ProviderID != flow.Spec.ProviderId {
+		return nil, fmt.Errorf("%w: top-level flow provider %q cannot be changed to %q (delete the resource and create a new one with a different alias)",
+			errProviderChangeUnsupported, *live.ProviderID, flow.Spec.ProviderId)
+	}
+
+	liveDescription := ""
+	if live.Description != nil {
+		liveDescription = *live.Description
+	}
+	if liveDescription != flow.Spec.Description {
+		topLevel := true
+		builtIn := false
+		upd := keycloak.AuthenticationFlowRepresentation{
+			ID:          &existingFlowID,
+			Alias:       &flow.Spec.Alias,
+			Description: &flow.Spec.Description,
+			ProviderID:  &flow.Spec.ProviderId,
+			TopLevel:    &topLevel,
+			BuiltIn:     &builtIn,
+		}
+		if err := kc.UpdateAuthenticationFlow(ctx, realmName, existingFlowID, upd); err != nil {
+			return nil, fmt.Errorf("updating top-level fields of flow %q: %w", flow.Spec.Alias, err)
+		}
+	}
+
+	liveTree, err := r.readLiveTree(ctx, kc, realmName, flow.Spec.Alias)
+	if err != nil {
+		return nil, fmt.Errorf("reading live execution tree for flow %q: %w", flow.Spec.Alias, err)
+	}
+
+	stats := &updateStats{}
+	if err := r.reconcileChildren(ctx, kc, realmName, flow.Spec.Alias, executions, liveTree, stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func (r *KeycloakAuthenticationFlowReconciler) deleteFlow(ctx context.Context, flow *keycloakv1beta1.KeycloakAuthenticationFlow) error {

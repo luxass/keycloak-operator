@@ -279,3 +279,86 @@ func rawExt(t *testing.T, s string) runtime.RawExtension {
 	require.NoError(t, err)
 	return runtime.RawExtension{Raw: b}
 }
+
+func TestMatchExecutions(t *testing.T) {
+	leaf := func(name string) flowExecution {
+		return flowExecution{Authenticator: name, Requirement: "REQUIRED"}
+	}
+	sub := func(name string) flowExecution {
+		return flowExecution{SubFlow: &flowDefinition{Alias: name, ProviderID: "basic-flow"}, Requirement: "ALTERNATIVE"}
+	}
+	liveLeaf := func(id, name string) liveExecution {
+		return liveExecution{ID: id, Authenticator: name, IsFlow: false, Requirement: "REQUIRED"}
+	}
+	liveSub := func(id, name string) liveExecution {
+		return liveExecution{ID: id, SubFlowAlias: name, IsFlow: true, Requirement: "ALTERNATIVE"}
+	}
+
+	t.Run("all matched", func(t *testing.T) {
+		desired := []flowExecution{leaf("auth-cookie"), sub("forms")}
+		live := []liveExecution{liveLeaf("1", "auth-cookie"), liveSub("2", "forms")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{0, 1}, matches)
+		require.Equal(t, []bool{true, true}, matchedLive)
+	})
+
+	t.Run("matches survive reordering", func(t *testing.T) {
+		desired := []flowExecution{leaf("auth-cookie"), sub("forms")}
+		live := []liveExecution{liveSub("2", "forms"), liveLeaf("1", "auth-cookie")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{1, 0}, matches)
+		require.Equal(t, []bool{true, true}, matchedLive)
+	})
+
+	t.Run("desired-only entries surface as adds", func(t *testing.T) {
+		desired := []flowExecution{leaf("auth-cookie"), leaf("auth-otp"), sub("forms")}
+		live := []liveExecution{liveLeaf("1", "auth-cookie")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{0, -1, -1}, matches)
+		require.Equal(t, []bool{true}, matchedLive)
+	})
+
+	t.Run("live-only entries surface as removes", func(t *testing.T) {
+		desired := []flowExecution{leaf("auth-cookie")}
+		live := []liveExecution{liveLeaf("1", "auth-cookie"), liveLeaf("2", "auth-otp"), liveSub("3", "forms")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{0}, matches)
+		require.Equal(t, []bool{true, false, false}, matchedLive)
+	})
+
+	t.Run("identity collision matches first then surfaces extras", func(t *testing.T) {
+		desired := []flowExecution{leaf("auth-cookie"), leaf("auth-cookie")}
+		live := []liveExecution{liveLeaf("1", "auth-cookie"), liveLeaf("2", "auth-cookie"), liveLeaf("3", "auth-cookie")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{0, 1}, matches)
+		require.Equal(t, []bool{true, true, false}, matchedLive)
+	})
+
+	t.Run("leaf and sub-flow with same name are not confused", func(t *testing.T) {
+		desired := []flowExecution{leaf("forms")}
+		live := []liveExecution{liveSub("1", "forms")}
+		matches, matchedLive := matchExecutions(desired, live)
+		require.Equal(t, []int{-1}, matches)
+		require.Equal(t, []bool{false}, matchedLive)
+	})
+}
+
+func TestConfigMapsEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     map[string]string
+		expected bool
+	}{
+		{name: "both nil", a: nil, b: nil, expected: true},
+		{name: "both empty", a: map[string]string{}, b: map[string]string{}, expected: true},
+		{name: "equal contents", a: map[string]string{"x": "1", "y": "2"}, b: map[string]string{"y": "2", "x": "1"}, expected: true},
+		{name: "missing key", a: map[string]string{"x": "1"}, b: map[string]string{"x": "1", "y": "2"}, expected: false},
+		{name: "changed value", a: map[string]string{"x": "1"}, b: map[string]string{"x": "2"}, expected: false},
+		{name: "extra key", a: map[string]string{"x": "1", "y": "2"}, b: map[string]string{"x": "1"}, expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, configMapsEqual(tt.a, tt.b))
+		})
+	}
+}

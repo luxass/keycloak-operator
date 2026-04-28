@@ -274,6 +274,208 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 		t.Logf("Flow %s verified in Keycloak", flowAlias)
 	})
 
+	t.Run("FlowInPlaceUpdate", func(t *testing.T) {
+		skipIfNoKeycloakAccess(t)
+
+		flowAlias := fmt.Sprintf("inplace-flow-%d", time.Now().UnixNano())
+		subFlowAlias := flowAlias + "-forms"
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
+				Alias:       flowAlias,
+				Description: "initial description",
+				ProviderId:  "basic-flow",
+				Executions: rawExecutions(fmt.Sprintf(`[
+					{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"},
+					{"authenticator":"auth-spnego","requirement":"DISABLED"},
+					{
+						"subFlow":{
+							"alias":"%s",
+							"providerId":"basic-flow",
+							"executions":[
+								{"authenticator":"auth-username-password-form","requirement":"REQUIRED"}
+							]
+						},
+						"requirement":"ALTERNATIVE"
+					}
+				]`, subFlowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		initial := waitForFlowReady(t, flow.Name)
+		originalFlowID := initial.Status.FlowID
+		require.NotEmpty(t, originalFlowID)
+
+		// Mutate the spec: change a leaf's requirement, drop one leaf,
+		// add a new sub-flow child, and tweak the description. Identity
+		// of every kept entry stays the same so reconcileChildren must
+		// patch in place rather than recreate.
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, flow))
+		flow.Spec.Description = "updated description"
+		flow.Spec.Executions = rawExecutions(fmt.Sprintf(`[
+			{"authenticator":"auth-cookie","requirement":"REQUIRED"},
+			{
+				"subFlow":{
+					"alias":"%s",
+					"providerId":"basic-flow",
+					"executions":[
+						{"authenticator":"auth-username-password-form","requirement":"REQUIRED"},
+						{"authenticator":"auth-otp-form","requirement":"REQUIRED"}
+					]
+				},
+				"requirement":"ALTERNATIVE"
+			}
+		]`, subFlowAlias))
+		require.NoError(t, k8sClient.Update(ctx, flow))
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready && updated.Status.ObservedGeneration == updated.Generation, nil
+		})
+		require.NoError(t, err, "Flow did not converge after in-place update")
+
+		converged := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, converged))
+		require.Equal(t, originalFlowID, converged.Status.FlowID, "Flow ID must stay stable across in-place update")
+
+		kc := getInternalKeycloakClient(t)
+		execs, err := kc.GetFlowExecutions(ctx, realmName, flowAlias)
+		require.NoError(t, err)
+
+		var sawAuthCookie, sawSpnego, sawForms bool
+		for i := range execs {
+			e := execs[i]
+			if e.Level == nil || *e.Level != 0 {
+				continue
+			}
+			switch {
+			case e.ProviderID != nil && *e.ProviderID == "auth-cookie":
+				sawAuthCookie = true
+				require.NotNil(t, e.Requirement)
+				require.Equal(t, "REQUIRED", *e.Requirement, "auth-cookie requirement should be updated to REQUIRED")
+			case e.ProviderID != nil && *e.ProviderID == "auth-spnego":
+				sawSpnego = true
+			case e.AuthenticationFlow != nil && *e.AuthenticationFlow && e.DisplayName != nil && *e.DisplayName == subFlowAlias:
+				sawForms = true
+			}
+		}
+		require.True(t, sawAuthCookie, "auth-cookie leaf must still be present")
+		require.False(t, sawSpnego, "auth-spnego leaf should have been removed")
+		require.True(t, sawForms, "forms sub-flow must still be present")
+
+		subExecs, err := kc.GetFlowExecutions(ctx, realmName, subFlowAlias)
+		require.NoError(t, err)
+		var sawUserPass, sawOtp bool
+		for _, e := range subExecs {
+			if e.Level != nil && *e.Level == 0 && e.ProviderID != nil {
+				if *e.ProviderID == "auth-username-password-form" {
+					sawUserPass = true
+				}
+				if *e.ProviderID == "auth-otp-form" {
+					sawOtp = true
+				}
+			}
+		}
+		require.True(t, sawUserPass, "username/password form must still be present in sub-flow")
+		require.True(t, sawOtp, "auth-otp-form must have been added to sub-flow")
+		t.Logf("Flow %s updated in place; ID %s preserved", flowAlias, originalFlowID)
+	})
+
+	t.Run("FlowBoundToRealmCanBeUpdated", func(t *testing.T) {
+		skipIfNoKeycloakAccess(t)
+
+		// Regression coverage for the user-reported case where a flow
+		// is referenced from somewhere else (here: a realm's browserFlow
+		// override). A delete-and-recreate update path would fail with
+		// Keycloak's "Cannot remove authentication flow, it is
+		// currently in use"; in-place reconciliation must succeed
+		// without releasing the binding.
+		customRealmName := fmt.Sprintf("test-realm-inplace-%d", time.Now().UnixNano())
+		flowAlias := fmt.Sprintf("realm-bound-flow-%d", time.Now().UnixNano())
+
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: customRealmName},
+				Alias:       flowAlias,
+				Description: "Bound to realm browserFlow",
+				ProviderId:  "basic-flow",
+				Executions:  rawExecutions(`[{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"}]`),
+			},
+		}
+
+		realm := &keycloakv1beta1.KeycloakRealm{
+			ObjectMeta: metav1.ObjectMeta{Name: customRealmName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRealmSpec{
+				InstanceRef: &keycloakv1beta1.ResourceRef{Name: instanceName, Namespace: &instanceNS},
+				Definition: rawJSON(fmt.Sprintf(`{
+					"realm": "%s",
+					"enabled": true,
+					"browserFlow": "%s"
+				}`, customRealmName, flowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, realm))
+		t.Cleanup(func() { k8sClient.Delete(ctx, realm) })
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRealm{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: realm.Name, Namespace: realm.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "Realm with deferred custom browserFlow did not become ready")
+
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		initial := waitForFlowReady(t, flow.Name)
+		originalFlowID := initial.Status.FlowID
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			kc := getInternalKeycloakClient(t)
+			realmRaw, err := kc.GetRealmRaw(ctx, customRealmName)
+			if err != nil {
+				return false, nil
+			}
+			var realmData map[string]interface{}
+			if err := json.Unmarshal(realmRaw, &realmData); err != nil {
+				return false, err
+			}
+			return realmData["browserFlow"] == flowAlias, nil
+		})
+		require.NoError(t, err, "Realm did not bind browserFlow to the custom flow")
+
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, flow))
+		flow.Spec.Executions = rawExecutions(`[
+			{"authenticator":"auth-cookie","requirement":"REQUIRED"},
+			{"authenticator":"identity-provider-redirector","requirement":"ALTERNATIVE"}
+		]`)
+		require.NoError(t, k8sClient.Update(ctx, flow))
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready && updated.Status.ObservedGeneration == updated.Generation, nil
+		})
+		require.NoError(t, err, "Realm-bound flow did not converge after update")
+
+		converged := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: flow.Name, Namespace: flow.Namespace}, converged))
+		require.Equal(t, originalFlowID, converged.Status.FlowID, "Flow ID must stay stable so realm binding remains valid")
+		require.Equal(t, "Ready", converged.Status.Status)
+		t.Logf("Realm-bound flow %s updated in place without releasing the binding", flowAlias)
+	})
+
 	t.Run("FlowCleanup", func(t *testing.T) {
 		flowAlias := fmt.Sprintf("cleanup-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{

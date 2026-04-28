@@ -1311,6 +1311,16 @@ func (c *Client) DeleteAuthenticationFlow(ctx context.Context, realmName, flowID
 	return c.Delete(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/flows/"+url.PathEscape(flowID))
 }
 
+// UpdateAuthenticationFlow updates a top-level authentication flow's
+// mutable fields (description, etc.) without recreating it. Provider type
+// changes on a top-level flow are not supported by Keycloak.
+func (c *Client) UpdateAuthenticationFlow(ctx context.Context, realmName, flowID string, flow AuthenticationFlowRepresentation) error {
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "UpdateAuthenticationFlow", func() error {
+		return c.Update(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/flows/"+url.PathEscape(flowID), flow)
+	})
+}
+
 // GetFlowExecutions returns the flat execution list for a flow
 func (c *Client) GetFlowExecutions(ctx context.Context, realmName, flowAlias string) ([]AuthenticationExecutionInfo, error) {
 	var executions []AuthenticationExecutionInfo
@@ -1371,6 +1381,33 @@ func (c *Client) CreateExecutionConfig(ctx context.Context, realmName, execution
 		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/executions/" + url.PathEscape(executionID) + "/config"
 		return c.Create(ctx, path, config)
 	})
+}
+
+// GetExecutionConfig fetches an authenticator config by its ID. Used by the
+// flow reconciler to compare the live config against the desired one before
+// deciding to PUT.
+func (c *Client) GetExecutionConfig(ctx context.Context, realmName, configID string) (*AuthenticatorConfigRepresentation, error) {
+	var config AuthenticatorConfigRepresentation
+	path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/config/" + url.PathEscape(configID)
+	if err := c.Get(ctx, path, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+// UpdateExecutionConfig replaces the contents of an existing authenticator
+// config. The config's ID must be set on the representation.
+func (c *Client) UpdateExecutionConfig(ctx context.Context, realmName, configID string, config AuthenticatorConfigRepresentation) error {
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "UpdateExecutionConfig", func() error {
+		path := "/admin/realms/" + url.PathEscape(realmName) + "/authentication/config/" + url.PathEscape(configID)
+		return c.Update(ctx, path, config)
+	})
+}
+
+// DeleteExecutionConfig removes an authenticator config by ID.
+func (c *Client) DeleteExecutionConfig(ctx context.Context, realmName, configID string) error {
+	return c.Delete(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/authentication/config/"+url.PathEscape(configID))
 }
 
 // ============================================================================
