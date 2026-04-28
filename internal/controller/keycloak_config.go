@@ -332,6 +332,43 @@ func setFieldInDefinition(definition json.RawMessage, field string, value interf
 	return result
 }
 
+var realmFlowBindingFields = []string{
+	"browserFlow",
+	"registrationFlow",
+	"directGrantFlow",
+	"resetCredentialsFlow",
+	"clientAuthenticationFlow",
+	"dockerAuthenticationFlow",
+}
+
+// stripRealmFlowBindingsForCreate removes top-level realm flow bindings from an
+// initial realm import. Custom flows managed by KeycloakAuthenticationFlow do
+// not exist at realm creation time, so the bindings are applied on a later
+// update once the realm is available.
+func stripRealmFlowBindingsForCreate(definition json.RawMessage) (json.RawMessage, bool) {
+	var defMap map[string]interface{}
+	if err := json.Unmarshal(definition, &defMap); err != nil {
+		return definition, false
+	}
+
+	changed := false
+	for _, field := range realmFlowBindingFields {
+		if _, ok := defMap[field]; ok {
+			delete(defMap, field)
+			changed = true
+		}
+	}
+	if !changed {
+		return definition, false
+	}
+
+	result, err := json.Marshal(defMap)
+	if err != nil {
+		return definition, false
+	}
+	return result, true
+}
+
 // flowAliasToKey maps alias-based keys in authenticationFlowBindingOverrides
 // to their corresponding Keycloak API keys.
 var flowAliasToKey = map[string]string{
@@ -354,7 +391,10 @@ func resolveFlowBindingAliases(ctx context.Context, kc *keycloak.Client, realmNa
 		if err != nil {
 			return "", err
 		}
-		return flow.ID, nil
+		if flow.ID == nil {
+			return "", fmt.Errorf("authentication flow %q has no ID", alias)
+		}
+		return *flow.ID, nil
 	})
 }
 

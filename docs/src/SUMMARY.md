@@ -25,6 +25,7 @@
   - [KeycloakComponent](./crds/keycloakcomponent.md)
   - [KeycloakIdentityProvider](./crds/keycloakidentityprovider.md)
   - [KeycloakOrganization](./crds/keycloakorganization.md)
+  - [KeycloakAuthenticationFlow](./crds/keycloakauthenticationflow.md)
 - [Monitoring](./monitoring.md)
 - [Architecture](./architecture.md)
 - [Development](./development.md)

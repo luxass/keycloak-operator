@@ -1,17 +1,10 @@
-// This controller differs from other resource controllers in this operator.
-// Most controllers pass a raw JSON definition to a single Keycloak API endpoint.
-// Authentication flows require a sequence of procedural API calls because
-// Keycloak provides no declarative PUT endpoint for complete flows. The
-// controller translates the typed spec into calls to create the flow, add
-// executions and sub-flows, set requirements, reorder by priority, and apply
-// authenticator configs. See the types file for more context on this design.
-
 package controller
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +19,98 @@ import (
 	keycloakv1beta1 "github.com/Hostzero-GmbH/keycloak-operator/api/v1beta1"
 	"github.com/Hostzero-GmbH/keycloak-operator/internal/keycloak"
 )
+
+// flowDefinition is the recursive representation of a (sub-)flow that the
+// controller works with after decoding the spec's free-form executions field.
+type flowDefinition struct {
+	Alias       string          `json:"alias"`
+	Description string          `json:"description,omitempty"`
+	ProviderID  string          `json:"providerId"`
+	Executions  []flowExecution `json:"executions,omitempty"`
+}
+
+// flowExecution is one node in the execution tree. Exactly one of
+// Authenticator or SubFlow must be set per node.
+type flowExecution struct {
+	Authenticator       string            `json:"authenticator,omitempty"`
+	SubFlow             *flowDefinition   `json:"subFlow,omitempty"`
+	Requirement         string            `json:"requirement"`
+	AuthenticatorConfig map[string]string `json:"authenticatorConfig,omitempty"`
+	// Executions accepts the "sibling" YAML shape, where child executions
+	// live next to subFlow rather than inside it. Both shapes are merged in
+	// declaration order: inline children (subFlow.executions) first, then
+	// sibling children (this field).
+	Executions []flowExecution `json:"executions,omitempty"`
+}
+
+// children returns the merged list of child executions for a sub-flow node:
+// inline children inside subFlow.executions first, then sibling children
+// declared next to subFlow. Returns nil for leaf authenticator nodes.
+func (e flowExecution) children() []flowExecution {
+	if e.SubFlow == nil {
+		return nil
+	}
+	if len(e.Executions) == 0 {
+		return e.SubFlow.Executions
+	}
+	if len(e.SubFlow.Executions) == 0 {
+		return e.Executions
+	}
+	merged := make([]flowExecution, 0, len(e.SubFlow.Executions)+len(e.Executions))
+	merged = append(merged, e.SubFlow.Executions...)
+	merged = append(merged, e.Executions...)
+	return merged
+}
+
+// parseExecutions decodes the spec's executions field into the recursive
+// representation. Validation errors include the JSON-pointer-style path of
+// the offending node, e.g. "[1].executions[0].requirement is required".
+func parseExecutions(raw runtime.RawExtension) ([]flowExecution, error) {
+	if len(raw.Raw) == 0 {
+		return nil, nil
+	}
+	var execs []flowExecution
+	if err := json.Unmarshal(raw.Raw, &execs); err != nil {
+		return nil, fmt.Errorf("decoding executions: %w", err)
+	}
+	if err := validateExecutions(execs, ""); err != nil {
+		return nil, err
+	}
+	return execs, nil
+}
+
+func validateExecutions(execs []flowExecution, path string) error {
+	for i, e := range execs {
+		nodePath := fmt.Sprintf("%s[%d]", path, i)
+		hasAuth := e.Authenticator != ""
+		hasSub := e.SubFlow != nil
+		if hasAuth == hasSub {
+			return fmt.Errorf("%s: exactly one of authenticator or subFlow must be set", nodePath)
+		}
+		if hasSub {
+			if strings.TrimSpace(e.SubFlow.Alias) == "" {
+				return fmt.Errorf("%s.subFlow.alias is required", nodePath)
+			}
+			if strings.TrimSpace(e.SubFlow.ProviderID) == "" {
+				return fmt.Errorf("%s.subFlow.providerId is required", nodePath)
+			}
+		}
+		if e.Requirement == "" {
+			return fmt.Errorf("%s.requirement is required", nodePath)
+		}
+		switch e.Requirement {
+		case "REQUIRED", "ALTERNATIVE", "DISABLED", "CONDITIONAL":
+		default:
+			return fmt.Errorf("%s.requirement %q is not one of REQUIRED|ALTERNATIVE|DISABLED|CONDITIONAL", nodePath, e.Requirement)
+		}
+		if hasSub {
+			if err := validateExecutions(e.children(), nodePath+".executions"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // KeycloakAuthenticationFlowReconciler reconciles a KeycloakAuthenticationFlow object
 type KeycloakAuthenticationFlowReconciler struct {
@@ -89,14 +174,22 @@ func (r *KeycloakAuthenticationFlowReconciler) Reconcile(ctx context.Context, re
 	kc, realmName, err := r.getKeycloakClientAndRealm(ctx, flow)
 	if err != nil {
 		RecordError(controllerName, "realm_not_ready")
-		return r.updateStatus(ctx, flow, false, "RealmNotReady", err.Error(), "")
+		return r.updateStatus(ctx, flow, false, "RealmNotReady", err.Error(), "", "")
+	}
+
+	// Validate the spec early so we report decoding/shape errors with a clear
+	// message instead of failing later inside a Keycloak API call.
+	executions, err := parseExecutions(flow.Spec.Executions)
+	if err != nil {
+		RecordError(controllerName, "invalid_spec")
+		return r.updateStatus(ctx, flow, false, "InvalidSpec", err.Error(), "", realmName)
 	}
 
 	// Find existing flow by alias
 	existingFlowID, err := r.findFlowByAlias(ctx, kc, realmName, flow.Spec.Alias)
 	if err != nil {
 		RecordError(controllerName, "keycloak_api_error")
-		return r.updateStatus(ctx, flow, false, "APIError", fmt.Sprintf("Failed to list flows: %v", err), "")
+		return r.updateStatus(ctx, flow, false, "APIError", fmt.Sprintf("Failed to list flows: %v", err), "", realmName)
 	}
 
 	if existingFlowID != "" {
@@ -105,28 +198,24 @@ func (r *KeycloakAuthenticationFlowReconciler) Reconcile(ctx context.Context, re
 			log.Info("spec changed, recreating flow", "alias", flow.Spec.Alias)
 			if err := kc.DeleteAuthenticationFlow(ctx, realmName, existingFlowID); err != nil {
 				RecordError(controllerName, "keycloak_api_error")
-				return r.updateStatus(ctx, flow, false, "DeleteFailed", fmt.Sprintf("Failed to delete flow for recreation: %v", err), existingFlowID)
+				return r.updateStatus(ctx, flow, false, "DeleteFailed", fmt.Sprintf("Failed to delete flow for recreation: %v", err), existingFlowID, realmName)
 			}
 			existingFlowID = ""
 		} else {
 			log.Info("flow already exists", "alias", flow.Spec.Alias, "id", existingFlowID)
-			return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", existingFlowID)
+			return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", existingFlowID, realmName)
 		}
 	}
 
-	if existingFlowID == "" {
-		// Create flow and execution tree
-		log.Info("creating authentication flow", "alias", flow.Spec.Alias, "realm", realmName)
-		flowID, err := r.createFlowTree(ctx, kc, realmName, flow)
-		if err != nil {
-			RecordError(controllerName, "keycloak_api_error")
-			return r.updateStatus(ctx, flow, false, "CreateFailed", fmt.Sprintf("Failed to create flow: %v", err), "")
-		}
-		log.Info("authentication flow created", "alias", flow.Spec.Alias, "id", flowID)
-		return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", flowID)
+	// Create flow and execution tree
+	log.Info("creating authentication flow", "alias", flow.Spec.Alias, "realm", realmName)
+	flowID, err := r.createFlowTree(ctx, kc, realmName, flow, executions)
+	if err != nil {
+		RecordError(controllerName, "keycloak_api_error")
+		return r.updateStatus(ctx, flow, false, "CreateFailed", fmt.Sprintf("Failed to create flow: %v", err), "", realmName)
 	}
-
-	return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", existingFlowID)
+	log.Info("authentication flow created", "alias", flow.Spec.Alias, "id", flowID)
+	return r.updateStatus(ctx, flow, true, "Ready", "Authentication flow synchronized", flowID, realmName)
 }
 
 func (r *KeycloakAuthenticationFlowReconciler) findFlowByAlias(ctx context.Context, kc *keycloak.Client, realmName, alias string) (string, error) {
@@ -135,16 +224,14 @@ func (r *KeycloakAuthenticationFlowReconciler) findFlowByAlias(ctx context.Conte
 		return "", err
 	}
 	for _, f := range flows {
-		if f.Alias != nil && *f.Alias == alias {
-			if f.ID != nil {
-				return *f.ID, nil
-			}
+		if f.Alias != nil && *f.Alias == alias && f.ID != nil {
+			return *f.ID, nil
 		}
 	}
 	return "", nil
 }
 
-func (r *KeycloakAuthenticationFlowReconciler) createFlowTree(ctx context.Context, kc *keycloak.Client, realmName string, flow *keycloakv1beta1.KeycloakAuthenticationFlow) (string, error) {
+func (r *KeycloakAuthenticationFlowReconciler) createFlowTree(ctx context.Context, kc *keycloak.Client, realmName string, flow *keycloakv1beta1.KeycloakAuthenticationFlow, executions []flowExecution) (string, error) {
 	topLevel := true
 	builtIn := false
 	flowRep := keycloak.AuthenticationFlowRepresentation{
@@ -160,7 +247,7 @@ func (r *KeycloakAuthenticationFlowReconciler) createFlowTree(ctx context.Contex
 		return "", fmt.Errorf("creating top-level flow %q: %w", flow.Spec.Alias, err)
 	}
 
-	if err := r.addExecutions(ctx, kc, realmName, flow.Spec.Alias, flow.Spec.Executions); err != nil {
+	if err := r.addExecutions(ctx, kc, realmName, flow.Spec.Alias, executions); err != nil {
 		// Best-effort cleanup on failure
 		_ = kc.DeleteAuthenticationFlow(ctx, realmName, flowID)
 		return "", err
@@ -169,36 +256,35 @@ func (r *KeycloakAuthenticationFlowReconciler) createFlowTree(ctx context.Contex
 	return flowID, nil
 }
 
-// addExecutions adds a list of executions to a flow identified by its alias.
-// For each sub-flow, it recurses to add the sub-flow's children.
-func (r *KeycloakAuthenticationFlowReconciler) addExecutions(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, executions []keycloakv1beta1.AuthenticationExecution) error {
+// addExecutions adds an ordered list of executions under parentAlias and
+// recurses into any sub-flows. Reordering is performed once per parent at the
+// end so each new node sits at the correct position regardless of the order
+// Keycloak assigns to newly added executions.
+func (r *KeycloakAuthenticationFlowReconciler) addExecutions(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, executions []flowExecution) error {
 	for _, exec := range executions {
 		if exec.SubFlow != nil {
 			if err := r.addSubFlow(ctx, kc, realmName, parentAlias, exec); err != nil {
 				return err
 			}
-		} else if exec.Authenticator != "" {
+		} else {
 			if err := r.addAuthenticatorExecution(ctx, kc, realmName, parentAlias, exec); err != nil {
 				return err
 			}
 		}
 	}
-
-	// Reorder executions to match the spec ordering
-	if err := r.reorderExecutions(ctx, kc, realmName, parentAlias, executions); err != nil {
-		return fmt.Errorf("reordering executions in flow %q: %w", parentAlias, err)
+	if len(executions) > 1 {
+		if err := r.reorderChildren(ctx, kc, realmName, parentAlias, executions); err != nil {
+			return fmt.Errorf("reordering executions in flow %q: %w", parentAlias, err)
+		}
 	}
-
 	return nil
 }
 
-func (r *KeycloakAuthenticationFlowReconciler) addAuthenticatorExecution(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, exec keycloakv1beta1.AuthenticationExecution) error {
-	_, err := kc.AddFlowExecution(ctx, realmName, parentAlias, exec.Authenticator)
-	if err != nil {
+func (r *KeycloakAuthenticationFlowReconciler) addAuthenticatorExecution(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, exec flowExecution) error {
+	if _, err := kc.AddFlowExecution(ctx, realmName, parentAlias, exec.Authenticator); err != nil {
 		return fmt.Errorf("adding execution %q to flow %q: %w", exec.Authenticator, parentAlias, err)
 	}
 
-	// Find the newly added execution to set its requirement
 	execInfo, err := r.findExecution(ctx, kc, realmName, parentAlias, exec.Authenticator, false)
 	if err != nil {
 		return fmt.Errorf("finding execution %q after creation: %w", exec.Authenticator, err)
@@ -211,7 +297,6 @@ func (r *KeycloakAuthenticationFlowReconciler) addAuthenticatorExecution(ctx con
 		}
 	}
 
-	// Apply authenticator config if specified
 	if len(exec.AuthenticatorConfig) > 0 && execInfo != nil && execInfo.ID != nil {
 		configAlias := parentAlias + "-" + exec.Authenticator + "-config"
 		config := keycloak.AuthenticatorConfigRepresentation{
@@ -226,20 +311,12 @@ func (r *KeycloakAuthenticationFlowReconciler) addAuthenticatorExecution(ctx con
 	return nil
 }
 
-func (r *KeycloakAuthenticationFlowReconciler) addSubFlow(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, exec keycloakv1beta1.AuthenticationExecution) error {
-	subFlowDef := map[string]interface{}{
-		"alias":       exec.SubFlow.Alias,
-		"description": exec.SubFlow.Description,
-		"provider":    exec.SubFlow.ProviderId,
-		"type":        exec.SubFlow.ProviderId,
-	}
-
-	_, err := kc.AddFlowSubFlow(ctx, realmName, parentAlias, subFlowDef)
-	if err != nil {
+func (r *KeycloakAuthenticationFlowReconciler) addSubFlow(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, exec flowExecution) error {
+	subFlowDef := buildSubFlowDef(exec.SubFlow.Alias, exec.SubFlow.Description, exec.SubFlow.ProviderID)
+	if _, err := kc.AddFlowSubFlow(ctx, realmName, parentAlias, subFlowDef); err != nil {
 		return fmt.Errorf("adding sub-flow %q to flow %q: %w", exec.SubFlow.Alias, parentAlias, err)
 	}
 
-	// Find the newly added sub-flow execution to set its requirement
 	execInfo, err := r.findExecution(ctx, kc, realmName, parentAlias, exec.SubFlow.Alias, true)
 	if err != nil {
 		return fmt.Errorf("finding sub-flow %q after creation: %w", exec.SubFlow.Alias, err)
@@ -252,78 +329,57 @@ func (r *KeycloakAuthenticationFlowReconciler) addSubFlow(ctx context.Context, k
 		}
 	}
 
-	if len(exec.SubFlow.Executions) > 0 {
-		if err := r.addSubFlowChildren(ctx, kc, realmName, exec.SubFlow.Alias, exec.SubFlow.Executions); err != nil {
+	children := exec.children()
+	if len(children) > 0 {
+		if err := r.addExecutions(ctx, kc, realmName, exec.SubFlow.Alias, children); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-// addSubFlowChildren adds leaf-level authenticator executions to a sub-flow.
-func (r *KeycloakAuthenticationFlowReconciler) addSubFlowChildren(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, executions []keycloakv1beta1.SubFlowExecution) error {
-	for _, exec := range executions {
-		if _, err := kc.AddFlowExecution(ctx, realmName, parentAlias, exec.Authenticator); err != nil {
-			return fmt.Errorf("adding execution %q to sub-flow %q: %w", exec.Authenticator, parentAlias, err)
-		}
-
-		execInfo, err := r.findExecution(ctx, kc, realmName, parentAlias, exec.Authenticator, false)
-		if err != nil {
-			return fmt.Errorf("finding execution %q after creation: %w", exec.Authenticator, err)
-		}
-
-		if execInfo != nil && (execInfo.Requirement == nil || *execInfo.Requirement != exec.Requirement) {
-			execInfo.Requirement = &exec.Requirement
-			if err := kc.UpdateFlowExecution(ctx, realmName, parentAlias, *execInfo); err != nil {
-				return fmt.Errorf("setting requirement on execution %q: %w", exec.Authenticator, err)
-			}
-		}
-
-		if len(exec.AuthenticatorConfig) > 0 && execInfo != nil && execInfo.ID != nil {
-			configAlias := parentAlias + "-" + exec.Authenticator + "-config"
-			config := keycloak.AuthenticatorConfigRepresentation{
-				Alias:  &configAlias,
-				Config: exec.AuthenticatorConfig,
-			}
-			if _, err := kc.CreateExecutionConfig(ctx, realmName, *execInfo.ID, config); err != nil {
-				return fmt.Errorf("setting config on execution %q: %w", exec.Authenticator, err)
-			}
-		}
+// buildSubFlowDef constructs the request body for adding a sub-flow execution.
+// Empty optional fields are omitted to avoid unintentionally clearing values
+// on Keycloak versions that distinguish between absent and empty strings.
+func buildSubFlowDef(alias, description, providerId string) map[string]interface{} {
+	def := map[string]interface{}{
+		"alias":    alias,
+		"provider": providerId,
+		"type":     providerId,
 	}
-
-	if len(executions) > 1 {
-		if err := r.reorderSubFlowChildren(ctx, kc, realmName, parentAlias, executions); err != nil {
-			return fmt.Errorf("reordering executions in sub-flow %q: %w", parentAlias, err)
-		}
+	if description != "" {
+		def["description"] = description
 	}
-
-	return nil
+	return def
 }
 
-// reorderSubFlowChildren reorders leaf executions within a sub-flow.
-func (r *KeycloakAuthenticationFlowReconciler) reorderSubFlowChildren(ctx context.Context, kc *keycloak.Client, realmName, flowAlias string, desiredOrder []keycloakv1beta1.SubFlowExecution) error {
-	desired := make([]execIdentifier, 0, len(desiredOrder))
-	for _, e := range desiredOrder {
-		desired = append(desired, execIdentifier{name: e.Authenticator, isFlow: false})
+// reorderChildren bubble-sorts the direct children of parentAlias into the
+// order described by desired, using Keycloak's raise-priority endpoint (the
+// only tool the API offers for reordering).
+func (r *KeycloakAuthenticationFlowReconciler) reorderChildren(ctx context.Context, kc *keycloak.Client, realmName, parentAlias string, desired []flowExecution) error {
+	ids := make([]execIdentifier, 0, len(desired))
+	for _, e := range desired {
+		if e.SubFlow != nil {
+			ids = append(ids, execIdentifier{name: e.SubFlow.Alias, isFlow: true})
+		} else {
+			ids = append(ids, execIdentifier{name: e.Authenticator, isFlow: false})
+		}
 	}
 
-	for targetIdx := 0; targetIdx < len(desired); targetIdx++ {
-		execs, err := kc.GetFlowExecutions(ctx, realmName, flowAlias)
+	for targetIdx := 0; targetIdx < len(ids); targetIdx++ {
+		execs, err := kc.GetFlowExecutions(ctx, realmName, parentAlias)
 		if err != nil {
 			return err
 		}
-
 		topLevel := filterTopLevelExecutions(execs)
 
 		currentIdx := -1
 		for i, e := range topLevel {
-			if matchesIdentifier(e, desired[targetIdx]) {
+			if matchesIdentifier(e, ids[targetIdx]) {
 				currentIdx = i
 				break
 			}
 		}
-
 		if currentIdx < 0 || currentIdx == targetIdx {
 			continue
 		}
@@ -337,17 +393,16 @@ func (r *KeycloakAuthenticationFlowReconciler) reorderSubFlowChildren(ctx contex
 			}
 		}
 	}
-
 	return nil
 }
 
-// findExecution locates an execution within a flow by its provider ID or alias.
+// findExecution locates a direct child of flowAlias by its provider ID
+// (authenticators) or display name (sub-flows).
 func (r *KeycloakAuthenticationFlowReconciler) findExecution(ctx context.Context, kc *keycloak.Client, realmName, flowAlias, identifier string, isFlow bool) (*keycloak.AuthenticationExecutionInfo, error) {
 	execs, err := kc.GetFlowExecutions(ctx, realmName, flowAlias)
 	if err != nil {
 		return nil, err
 	}
-
 	for i := range execs {
 		e := &execs[i]
 		if isFlow {
@@ -363,61 +418,9 @@ func (r *KeycloakAuthenticationFlowReconciler) findExecution(ctx context.Context
 	return nil, nil
 }
 
-// reorderExecutions reorders executions within a flow to match the spec order.
-// Keycloak's API only supports raise/lower-priority, so we use a bubble-sort
-// approach: for each desired position, find the execution and raise it until
-// it reaches the correct index.
-func (r *KeycloakAuthenticationFlowReconciler) reorderExecutions(ctx context.Context, kc *keycloak.Client, realmName, flowAlias string, desiredOrder []keycloakv1beta1.AuthenticationExecution) error {
-	if len(desiredOrder) <= 1 {
-		return nil
-	}
-
-	desired := make([]execIdentifier, 0, len(desiredOrder))
-	for _, e := range desiredOrder {
-		if e.SubFlow != nil {
-			desired = append(desired, execIdentifier{name: e.SubFlow.Alias, isFlow: true})
-		} else {
-			desired = append(desired, execIdentifier{name: e.Authenticator, isFlow: false})
-		}
-	}
-
-	// Repeatedly fetch current state and bubble executions into position
-	for targetIdx := 0; targetIdx < len(desired); targetIdx++ {
-		execs, err := kc.GetFlowExecutions(ctx, realmName, flowAlias)
-		if err != nil {
-			return err
-		}
-
-		// Filter to only top-level executions (level 0) for this flow
-		topLevel := filterTopLevelExecutions(execs)
-
-		currentIdx := -1
-		for i, e := range topLevel {
-			if matchesIdentifier(e, desired[targetIdx]) {
-				currentIdx = i
-				break
-			}
-		}
-
-		if currentIdx < 0 || currentIdx == targetIdx {
-			continue
-		}
-
-		// Raise priority (currentIdx - targetIdx) times to move it up
-		for i := 0; i < currentIdx-targetIdx; i++ {
-			if topLevel[currentIdx].ID == nil {
-				break
-			}
-			if err := kc.RaiseExecutionPriority(ctx, realmName, *topLevel[currentIdx].ID); err != nil {
-				return fmt.Errorf("raising priority of execution: %w", err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// filterTopLevelExecutions returns only executions at level 0 (direct children of the flow).
+// filterTopLevelExecutions returns only executions at level 0 (direct children
+// of the queried flow). When the Keycloak version omits level info we fall
+// back to returning everything the API gave us.
 func filterTopLevelExecutions(execs []keycloak.AuthenticationExecutionInfo) []keycloak.AuthenticationExecutionInfo {
 	var result []keycloak.AuthenticationExecutionInfo
 	for _, e := range execs {
@@ -425,7 +428,6 @@ func filterTopLevelExecutions(execs []keycloak.AuthenticationExecutionInfo) []ke
 			result = append(result, e)
 		}
 	}
-	// If no level info, return all (Keycloak versions may differ)
 	if len(result) == 0 {
 		return execs
 	}
@@ -448,12 +450,10 @@ func (r *KeycloakAuthenticationFlowReconciler) deleteFlow(ctx context.Context, f
 	if flow.Status.FlowID == "" {
 		return nil
 	}
-
 	kc, realmName, err := r.getKeycloakClientAndRealm(ctx, flow)
 	if err != nil {
 		return err
 	}
-
 	return kc.DeleteAuthenticationFlow(ctx, realmName, flow.Status.FlowID)
 }
 
@@ -602,13 +602,13 @@ func (r *KeycloakAuthenticationFlowReconciler) getKeycloakClientFromClusterRealm
 	return kc, realmName, nil
 }
 
-func (r *KeycloakAuthenticationFlowReconciler) updateStatus(ctx context.Context, flow *keycloakv1beta1.KeycloakAuthenticationFlow, ready bool, status, message, flowID string) (ctrl.Result, error) {
+func (r *KeycloakAuthenticationFlowReconciler) updateStatus(ctx context.Context, flow *keycloakv1beta1.KeycloakAuthenticationFlow, ready bool, status, message, flowID, realmName string) (ctrl.Result, error) {
 	flow.Status.Ready = ready
 	flow.Status.Status = status
 	flow.Status.Message = message
 	flow.Status.FlowID = flowID
-	if flowID != "" {
-		flow.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s/authentication/flows/%s", flow.Spec.Alias, flowID)
+	if flowID != "" && realmName != "" {
+		flow.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s/authentication/flows/%s", realmName, flowID)
 	}
 
 	if ready {

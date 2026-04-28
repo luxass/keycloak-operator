@@ -219,6 +219,48 @@ Common properties:
 | `ssoSessionIdleTimeout` | integer | SSO session idle timeout (seconds) |
 | `accessTokenLifespan` | integer | Access token lifespan (seconds) |
 
+## Binding Custom Authentication Flows
+
+A realm definition may bind built-in authentication points to custom flows via `browserFlow`, `registrationFlow`, `directGrantFlow`, `resetCredentialsFlow`, `clientAuthenticationFlow`, or `dockerAuthenticationFlow`. Keycloak rejects realm imports that reference a flow alias which does not yet exist (see [keycloak/keycloak#23980](https://github.com/keycloak/keycloak/issues/23980)), which would otherwise prevent declaratively creating the realm and the flow at the same time.
+
+The operator works around this with **deferred bindings**:
+
+1. On the *first* `CreateRealm` call, any flow-binding fields whose target alias does not yet exist in Keycloak are stripped before the request is sent. The realm is created and marked `Ready`; the operator records that bindings were deferred.
+2. The realm controller watches `KeycloakAuthenticationFlow` resources and requeues the realm immediately when a referenced flow becomes ready, instead of waiting for the next periodic resync.
+3. On the next reconcile (either triggered by the watch or by the periodic resync) the operator updates the realm with the original bindings now that the referenced flows exist.
+
+Practically this means you can apply a `KeycloakRealm` and its `KeycloakAuthenticationFlow` resources together — in any order — and convergence happens within seconds.
+
+```yaml
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakRealm
+metadata:
+  name: my-realm
+spec:
+  instanceRef:
+    name: my-keycloak
+  definition:
+    realm: my-realm
+    enabled: true
+    browserFlow: my-custom-browser           # may be created later
+    registrationFlow: my-custom-registration # may be created later
+---
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakAuthenticationFlow
+metadata:
+  name: my-custom-browser
+spec:
+  realmRef:
+    name: my-realm
+  alias: my-custom-browser
+  providerId: basic-flow
+  executions:
+    - authenticator: auth-cookie
+      requirement: ALTERNATIVE
+```
+
+See [KeycloakAuthenticationFlow](./keycloakauthenticationflow.md) for the flow CRD reference.
+
 ## Preserving Realm on Deletion
 
 To keep the realm in Keycloak when deleting the CR:

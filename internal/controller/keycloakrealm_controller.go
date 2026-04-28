@@ -33,6 +33,7 @@ type KeycloakRealmReconciler struct {
 // +kubebuilder:rbac:groups=keycloak.hostzero.com,resources=keycloakrealms/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=keycloak.hostzero.com,resources=keycloakrealms/finalizers,verbs=update
 // +kubebuilder:rbac:groups=keycloak.hostzero.com,resources=keycloakinstances,verbs=get;list;watch
+// +kubebuilder:rbac:groups=keycloak.hostzero.com,resources=keycloakauthenticationflows,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile handles KeycloakRealm reconciliation
@@ -125,18 +126,44 @@ func (r *KeycloakRealmReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		// Realm doesn't exist, create it
 		log.Info("creating realm", "realm", realmDef.Realm)
-		if err := kc.CreateRealmFromDefinition(ctx, definition); err != nil {
+		createDefinition, flowBindingsDeferred := stripRealmFlowBindingsForCreate(definition)
+		if err := kc.CreateRealmFromDefinition(ctx, createDefinition); err != nil {
 			RecordError(controllerName, "keycloak_api_error")
 			return r.updateStatus(ctx, realm, false, "CreateFailed", fmt.Sprintf("Failed to create realm: %v", err), instanceRef)
 		}
 		log.Info("realm created successfully", "realm", realmDef.Realm)
+		if flowBindingsDeferred {
+			log.Info("deferred realm authentication flow bindings until referenced flows exist", "realm", realmDef.Realm)
+			realm.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s", realmDef.Realm)
+			result, statusErr := r.updateStatus(ctx, realm, true, "Ready", "Realm synchronized; authentication flow bindings will be retried after referenced flows exist", instanceRef)
+			if statusErr != nil {
+				return result, statusErr
+			}
+			result.RequeueAfter = ErrorRequeueDelay
+			return result, nil
+		}
 	} else {
 		// Realm exists, update it - merge ID into definition
 		log.Info("updating realm", "realm", realmDef.Realm)
 		definition = mergeIDIntoDefinition(definition, existingRealm.ID)
 		if err := kc.UpdateRealm(ctx, realmDef.Realm, definition); err != nil {
-			RecordError(controllerName, "keycloak_api_error")
-			return r.updateStatus(ctx, realm, false, "UpdateFailed", fmt.Sprintf("Failed to update realm: %v", err), instanceRef)
+			strippedDefinition, flowBindingsDeferred := stripRealmFlowBindingsForCreate(definition)
+			if !flowBindingsDeferred {
+				RecordError(controllerName, "keycloak_api_error")
+				return r.updateStatus(ctx, realm, false, "UpdateFailed", fmt.Sprintf("Failed to update realm: %v", err), instanceRef)
+			}
+			log.Info("realm update failed with authentication flow bindings; retrying without them", "realm", realmDef.Realm, "error", err)
+			if fallbackErr := kc.UpdateRealm(ctx, realmDef.Realm, strippedDefinition); fallbackErr != nil {
+				RecordError(controllerName, "keycloak_api_error")
+				return r.updateStatus(ctx, realm, false, "UpdateFailed", fmt.Sprintf("Failed to update realm: %v", err), instanceRef)
+			}
+			realm.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s", realmDef.Realm)
+			result, statusErr := r.updateStatus(ctx, realm, true, "Ready", "Realm synchronized; authentication flow bindings will be retried after referenced flows exist", instanceRef)
+			if statusErr != nil {
+				return result, statusErr
+			}
+			result.RequeueAfter = ErrorRequeueDelay
+			return result, nil
 		}
 		log.Info("realm updated successfully", "realm", realmDef.Realm)
 	}
@@ -311,6 +338,10 @@ func (r *KeycloakRealmReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findRealmsForSecret),
 		).
+		Watches(
+			&keycloakv1beta1.KeycloakAuthenticationFlow{},
+			handler.EnqueueRequestsFromMapFunc(r.findRealmsForAuthenticationFlow),
+		).
 		Complete(r)
 }
 
@@ -335,4 +366,26 @@ func (r *KeycloakRealmReconciler) findRealmsForSecret(ctx context.Context, obj c
 		}
 	}
 	return requests
+}
+
+// findRealmsForAuthenticationFlow requeues the KeycloakRealm that the given
+// flow targets. This shortens the deferred-flow-binding feedback loop: as soon
+// as a custom flow is created or its readiness changes, any realm referencing
+// it via browserFlow / registrationFlow / etc. is reconciled instead of
+// waiting for the next periodic retry.
+func (r *KeycloakRealmReconciler) findRealmsForAuthenticationFlow(ctx context.Context, obj client.Object) []reconcile.Request {
+	flow, ok := obj.(*keycloakv1beta1.KeycloakAuthenticationFlow)
+	if !ok || flow.Spec.RealmRef == nil {
+		return nil
+	}
+	ns := flow.Namespace
+	if flow.Spec.RealmRef.Namespace != nil {
+		ns = *flow.Spec.RealmRef.Namespace
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      flow.Spec.RealmRef.Name,
+			Namespace: ns,
+		},
+	}}
 }

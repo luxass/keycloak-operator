@@ -20,6 +20,7 @@ KeycloakInstance / ClusterKeycloakInstance
             ├── KeycloakRoleMapping (maps roles to Users/Groups)
             ├── KeycloakComponent (LDAP, key providers, etc.)
             ├── KeycloakIdentityProvider
+            ├── KeycloakAuthenticationFlow
             └── KeycloakOrganization (requires Keycloak 26+)
 ```
 
@@ -68,6 +69,7 @@ KeycloakInstance / ClusterKeycloakInstance
 |-----|-------------|--------|
 | [KeycloakComponent](./crds/keycloakcomponent.md) | LDAP federation, key providers | KeycloakRealm |
 | [KeycloakIdentityProvider](./crds/keycloakidentityprovider.md) | External identity providers | KeycloakRealm |
+| [KeycloakAuthenticationFlow](./crds/keycloakauthenticationflow.md) | Custom authentication / registration flows | KeycloakRealm |
 | [KeycloakOrganization](./crds/keycloakorganization.md) | Organization management² | KeycloakRealm |
 
 ¹ KeycloakUser supports `clientRef` for managing service account users associated with a client  

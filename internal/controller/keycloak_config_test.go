@@ -644,3 +644,45 @@ func TestResolveFlowBindingAliases(t *testing.T) {
 		})
 	}
 }
+
+func TestStripRealmFlowBindingsForCreate(t *testing.T) {
+	definition := json.RawMessage(`{
+		"realm": "example",
+		"enabled": true,
+		"browserFlow": "custom browser",
+		"registrationFlow": "custom registration",
+		"directGrantFlow": "custom direct grant",
+		"displayName": "Example"
+	}`)
+
+	result, changed := stripRealmFlowBindingsForCreate(definition)
+	if !changed {
+		t.Fatal("expected flow bindings to be stripped")
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+
+	for _, field := range []string{"browserFlow", "registrationFlow", "directGrantFlow"} {
+		if _, ok := got[field]; ok {
+			t.Fatalf("%s should have been removed", field)
+		}
+	}
+	if got["realm"] != "example" || got["enabled"] != true || got["displayName"] != "Example" {
+		t.Fatalf("non-flow fields were not preserved: %v", got)
+	}
+}
+
+func TestStripRealmFlowBindingsForCreateNoBindings(t *testing.T) {
+	definition := json.RawMessage(`{"realm":"example","enabled":true}`)
+
+	result, changed := stripRealmFlowBindingsForCreate(definition)
+	if changed {
+		t.Fatal("expected no change")
+	}
+	if string(result) != string(definition) {
+		t.Fatalf("expected original definition, got %s", string(result))
+	}
+}

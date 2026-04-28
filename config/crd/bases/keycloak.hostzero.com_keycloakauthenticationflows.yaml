@@ -34,9 +34,8 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: |-
-          KeycloakAuthenticationFlow manages a Keycloak authentication flow via the
-          procedural Admin REST API for flows and executions.
+        description: KeycloakAuthenticationFlow manages a Keycloak authentication
+          flow.
         properties:
           apiVersion:
             description: |-
@@ -79,101 +78,38 @@ spec:
                 description: Description is a human-readable description of the flow.
                 type: string
               executions:
-                description: Executions defines the ordered list of authenticator
-                  executions and sub-flows.
-                items:
-                  description: |-
-                    AuthenticationExecution defines a single execution step within a flow.
-                    Exactly one of Authenticator or SubFlow must be set.
-                  properties:
-                    authenticator:
-                      description: |-
-                        Authenticator is the provider ID (e.g. "auth-cookie", "auth-username-password-form").
-                        Mutually exclusive with SubFlow.
-                      type: string
-                    authenticatorConfig:
-                      additionalProperties:
-                        type: string
-                      description: |-
-                        AuthenticatorConfig contains key-value configuration for the authenticator.
-                        Only valid when Authenticator is set.
-                      type: object
-                    requirement:
-                      description: 'Requirement is the execution requirement: REQUIRED,
-                        ALTERNATIVE, DISABLED, or CONDITIONAL.'
-                      enum:
-                      - REQUIRED
-                      - ALTERNATIVE
-                      - DISABLED
-                      - CONDITIONAL
-                      type: string
-                    subFlow:
-                      description: |-
-                        SubFlow defines a nested sub-flow. Mutually exclusive with Authenticator.
-                        Sub-flow children are defined inside SubFlowDefinition.Executions.
-                      properties:
-                        alias:
-                          description: Alias is the unique identifier for this sub-flow.
-                          minLength: 1
-                          type: string
-                        description:
-                          description: Description is a human-readable description
-                            of the sub-flow.
-                          type: string
-                        executions:
-                          description: Executions defines the ordered list of authenticator
-                            executions within this sub-flow.
-                          items:
-                            description: |-
-                              SubFlowExecution defines an authenticator execution within a sub-flow.
-                              Unlike AuthenticationExecution, this type does not support further nesting;
-                              Keycloak flows rarely exceed two levels in practice.
-                            properties:
-                              authenticator:
-                                description: Authenticator is the provider ID (e.g.
-                                  "auth-username-password-form").
-                                minLength: 1
-                                type: string
-                              authenticatorConfig:
-                                additionalProperties:
-                                  type: string
-                                description: AuthenticatorConfig contains key-value
-                                  configuration for the authenticator.
-                                type: object
-                              requirement:
-                                description: 'Requirement is the execution requirement:
-                                  REQUIRED, ALTERNATIVE, DISABLED, or CONDITIONAL.'
-                                enum:
-                                - REQUIRED
-                                - ALTERNATIVE
-                                - DISABLED
-                                - CONDITIONAL
-                                type: string
-                            required:
-                            - authenticator
-                            - requirement
-                            type: object
-                          type: array
-                        providerId:
-                          description: ProviderId is the sub-flow type, typically
-                            "basic-flow".
-                          enum:
-                          - basic-flow
-                          - client-flow
-                          type: string
-                      required:
-                      - alias
-                      - providerId
-                      type: object
-                  required:
-                  - requirement
-                  type: object
-                type: array
+                description: |-
+                  Executions is the ordered list of executions for this flow as a JSON
+                  array. Each entry is either a leaf authenticator or a nested sub-flow.
+
+                  Leaf authenticator (object fields):
+
+                    authenticator:        Keycloak provider ID, e.g. "auth-cookie".
+                    requirement:          REQUIRED | ALTERNATIVE | DISABLED | CONDITIONAL.
+                    authenticatorConfig:  optional map[string]string applied to the
+                                          execution after creation.
+
+                  Sub-flow (object fields):
+
+                    subFlow:              { alias, providerId, description? } — the
+                                          child flow definition. providerId is typically
+                                          "basic-flow" or "form-flow"; "form-flow" is
+                                          required when the children are FormAction
+                                          providers (e.g. registration-user-creation).
+                    requirement:          REQUIRED | ALTERNATIVE | DISABLED | CONDITIONAL.
+                    executions:           ordered list of child executions, recursively
+                                          using the same shape. As a convenience, child
+                                          executions may also be placed inside
+                                          subFlow.executions; if both are present, the
+                                          inline list precedes the sibling list.
+
+                  Nesting depth is unconstrained.
+                x-kubernetes-preserve-unknown-fields: true
               providerId:
-                description: 'ProviderId is the flow type: "basic-flow" or "client-flow".'
-                enum:
-                - basic-flow
-                - client-flow
+                description: |-
+                  ProviderId is the top-level flow type. Keycloak ships with "basic-flow"
+                  and "client-flow"; sub-flows may additionally use "form-flow".
+                minLength: 1
                 type: string
               realmRef:
                 description: |-

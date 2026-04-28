@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -9,11 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	keycloakv1beta1 "github.com/Hostzero-GmbH/keycloak-operator/api/v1beta1"
 )
+
+// rawExecutions wraps a JSON literal in a runtime.RawExtension.
+func rawExecutions(s string) runtime.RawExtension {
+	return runtime.RawExtension{Raw: []byte(s)}
+}
+
+func waitForFlowReady(t *testing.T, name string) *keycloakv1beta1.KeycloakAuthenticationFlow {
+	t.Helper()
+	updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+	err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		if err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: testNamespace,
+		}, updated); err != nil {
+			return false, nil
+		}
+		return updated.Status.Ready, nil
+	})
+	require.NoError(t, err, "Authentication flow %s did not become ready: %s", name, updated.Status.Message)
+	return updated
+}
 
 func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 	skipIfNoCluster(t)
@@ -24,49 +47,22 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 	t.Run("SimpleFlow", func(t *testing.T) {
 		flowAlias := fmt.Sprintf("simple-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      flowAlias,
-				Namespace: testNamespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
 				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
 				Alias:       flowAlias,
 				Description: "Simple test flow",
 				ProviderId:  "basic-flow",
-				Executions: []keycloakv1beta1.AuthenticationExecution{
-					{
-						Authenticator: "auth-cookie",
-						Requirement:   "ALTERNATIVE",
-					},
-					{
-						Authenticator: "auth-spnego",
-						Requirement:   "DISABLED",
-					},
-				},
+				Executions: rawExecutions(`[
+					{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"},
+					{"authenticator":"auth-spnego","requirement":"DISABLED"}
+				]`),
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, flow))
-		t.Cleanup(func() {
-			k8sClient.Delete(ctx, flow)
-		})
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
 
-		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
-			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{
-				Name:      flow.Name,
-				Namespace: flow.Namespace,
-			}, updated); err != nil {
-				return false, nil
-			}
-			return updated.Status.Ready, nil
-		})
-		require.NoError(t, err, "Authentication flow did not become ready")
-
-		updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
-		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
-			Name:      flow.Name,
-			Namespace: flow.Namespace,
-		}, updated))
+		updated := waitForFlowReady(t, flow.Name)
 		require.NotEmpty(t, updated.Status.FlowID, "Flow ID should be set")
 		require.NotEmpty(t, updated.Status.ResourcePath, "Resource path should be set")
 		t.Logf("Flow %s is ready with ID %s", flowAlias, updated.Status.FlowID)
@@ -75,54 +71,173 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 	t.Run("FlowWithSubFlows", func(t *testing.T) {
 		flowAlias := fmt.Sprintf("nested-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      flowAlias,
-				Namespace: testNamespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
 				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
 				Alias:       flowAlias,
 				Description: "Nested test flow",
 				ProviderId:  "basic-flow",
-				Executions: []keycloakv1beta1.AuthenticationExecution{
+				Executions: rawExecutions(fmt.Sprintf(`[
+					{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"},
 					{
-						Authenticator: "auth-cookie",
-						Requirement:   "ALTERNATIVE",
-					},
-					{
-						SubFlow: &keycloakv1beta1.SubFlowDefinition{
-							Alias:       flowAlias + "-forms",
-							Description: "Form sub-flow",
-							ProviderId:  "basic-flow",
-							Executions: []keycloakv1beta1.SubFlowExecution{
-								{
-									Authenticator: "auth-username-password-form",
-									Requirement:   "REQUIRED",
-								},
-							},
+						"subFlow":{
+							"alias":"%s-forms",
+							"description":"Form sub-flow",
+							"providerId":"basic-flow",
+							"executions":[
+								{"authenticator":"auth-username-password-form","requirement":"REQUIRED"}
+							]
 						},
-						Requirement: "ALTERNATIVE",
-					},
-				},
+						"requirement":"ALTERNATIVE"
+					}
+				]`, flowAlias)),
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, flow))
-		t.Cleanup(func() {
-			k8sClient.Delete(ctx, flow)
-		})
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		waitForFlowReady(t, flow.Name)
+		t.Logf("Nested flow %s is ready", flowAlias)
+	})
+
+	t.Run("FlowWithSiblingExecutionsAndFormFlow", func(t *testing.T) {
+		flowAlias := fmt.Sprintf("registration-flow-%d", time.Now().UnixNano())
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
+				Alias:       flowAlias,
+				Description: "Registration flow using sibling executions shape",
+				ProviderId:  "basic-flow",
+				Executions: rawExecutions(fmt.Sprintf(`[
+					{
+						"subFlow":{
+							"alias":"%s-registration-form",
+							"providerId":"form-flow",
+							"description":"Registration form sub-flow"
+						},
+						"requirement":"REQUIRED",
+						"executions":[
+							{"authenticator":"registration-user-creation","requirement":"REQUIRED"},
+							{"authenticator":"registration-password-action","requirement":"REQUIRED"},
+							{"authenticator":"registration-terms-and-conditions","requirement":"DISABLED"}
+						]
+					}
+				]`, flowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		waitForFlowReady(t, flow.Name)
+		t.Logf("Registration flow %s is ready", flowAlias)
+	})
+
+	t.Run("FlowWithDeeplyNestedSubFlows", func(t *testing.T) {
+		// Mirrors Keycloak's built-in browser flow: a basic-flow "forms"
+		// sub-flow that contains a CONDITIONAL basic-flow "conditional 2FA"
+		// sub-flow which hosts the OTP authenticators.
+		flowAlias := fmt.Sprintf("browser-flow-%d", time.Now().UnixNano())
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
+				Alias:       flowAlias,
+				Description: "Browser flow with a nested conditional sub-flow",
+				ProviderId:  "basic-flow",
+				Executions: rawExecutions(fmt.Sprintf(`[
+					{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"},
+					{
+						"subFlow":{
+							"alias":"%s-forms",
+							"providerId":"basic-flow",
+							"executions":[
+								{"authenticator":"auth-username-password-form","requirement":"REQUIRED"},
+								{
+									"subFlow":{
+										"alias":"%s-conditional-2fa",
+										"providerId":"basic-flow",
+										"executions":[
+											{"authenticator":"conditional-user-configured","requirement":"REQUIRED"},
+											{"authenticator":"auth-otp-form","requirement":"REQUIRED"}
+										]
+									},
+									"requirement":"CONDITIONAL"
+								}
+							]
+						},
+						"requirement":"ALTERNATIVE"
+					}
+				]`, flowAlias, flowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		waitForFlowReady(t, flow.Name)
+		t.Logf("Deeply nested flow %s is ready", flowAlias)
+	})
+
+	t.Run("RealmWithDeferredCustomBrowserFlow", func(t *testing.T) {
+		skipIfNoKeycloakAccess(t)
+
+		customRealmName := fmt.Sprintf("test-realm-authflow-binding-%d", time.Now().UnixNano())
+		flowAlias := fmt.Sprintf("custom-browser-%d", time.Now().UnixNano())
+		realm := &keycloakv1beta1.KeycloakRealm{
+			ObjectMeta: metav1.ObjectMeta{Name: customRealmName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRealmSpec{
+				InstanceRef: &keycloakv1beta1.ResourceRef{Name: instanceName, Namespace: &instanceNS},
+				Definition: rawJSON(fmt.Sprintf(`{
+					"realm": "%s",
+					"enabled": true,
+					"browserFlow": "%s"
+				}`, customRealmName, flowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, realm))
+		t.Cleanup(func() { k8sClient.Delete(ctx, realm) })
 
 		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
-			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+			updated := &keycloakv1beta1.KeycloakRealm{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{
-				Name:      flow.Name,
-				Namespace: flow.Namespace,
+				Name:      realm.Name,
+				Namespace: realm.Namespace,
 			}, updated); err != nil {
 				return false, nil
 			}
 			return updated.Status.Ready, nil
 		})
-		require.NoError(t, err, "Nested flow did not become ready")
-		t.Logf("Nested flow %s is ready", flowAlias)
+		require.NoError(t, err, "Realm with deferred custom browserFlow did not become ready")
+
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: customRealmName},
+				Alias:       flowAlias,
+				Description: "Custom browser flow bound by KeycloakRealm",
+				ProviderId:  "basic-flow",
+				Executions:  rawExecutions(`[{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"}]`),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		waitForFlowReady(t, flow.Name)
+
+		kc := getInternalKeycloakClient(t)
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			realmRaw, err := kc.GetRealmRaw(ctx, customRealmName)
+			if err != nil {
+				return false, nil
+			}
+			var realmData map[string]interface{}
+			if err := json.Unmarshal(realmRaw, &realmData); err != nil {
+				return false, err
+			}
+			return realmData["browserFlow"] == flowAlias, nil
+		})
+		require.NoError(t, err, "Realm did not bind browserFlow to the custom flow")
+		t.Logf("Realm %s bound browserFlow to %s", customRealmName, flowAlias)
 	})
 
 	t.Run("FlowWithKeycloakVerification", func(t *testing.T) {
@@ -130,39 +245,19 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 
 		flowAlias := fmt.Sprintf("verify-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      flowAlias,
-				Namespace: testNamespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
 				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
 				Alias:       flowAlias,
 				Description: "Verified test flow",
 				ProviderId:  "basic-flow",
-				Executions: []keycloakv1beta1.AuthenticationExecution{
-					{
-						Authenticator: "auth-cookie",
-						Requirement:   "ALTERNATIVE",
-					},
-				},
+				Executions:  rawExecutions(`[{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"}]`),
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, flow))
-		t.Cleanup(func() {
-			k8sClient.Delete(ctx, flow)
-		})
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
 
-		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
-			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{
-				Name:      flow.Name,
-				Namespace: flow.Namespace,
-			}, updated); err != nil {
-				return false, nil
-			}
-			return updated.Status.Ready, nil
-		})
-		require.NoError(t, err, "Flow did not become ready")
+		waitForFlowReady(t, flow.Name)
 
 		kc := getInternalKeycloakClient(t)
 		flows, err := kc.GetAuthenticationFlows(ctx, realmName)
@@ -182,40 +277,22 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 	t.Run("FlowCleanup", func(t *testing.T) {
 		flowAlias := fmt.Sprintf("cleanup-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      flowAlias,
-				Namespace: testNamespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
 				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
 				Alias:       flowAlias,
 				Description: "Cleanup test flow",
 				ProviderId:  "basic-flow",
-				Executions: []keycloakv1beta1.AuthenticationExecution{
-					{
-						Authenticator: "auth-cookie",
-						Requirement:   "ALTERNATIVE",
-					},
-				},
+				Executions:  rawExecutions(`[{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"}]`),
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, flow))
 
-		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
-			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{
-				Name:      flow.Name,
-				Namespace: flow.Namespace,
-			}, updated); err != nil {
-				return false, nil
-			}
-			return updated.Status.Ready, nil
-		})
-		require.NoError(t, err)
+		waitForFlowReady(t, flow.Name)
 
 		require.NoError(t, k8sClient.Delete(ctx, flow))
 
-		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
 			check := &keycloakv1beta1.KeycloakAuthenticationFlow{}
 			err := k8sClient.Get(ctx, types.NamespacedName{
 				Name:      flow.Name,
@@ -230,27 +307,17 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 	t.Run("MissingRealmRef", func(t *testing.T) {
 		flowAlias := fmt.Sprintf("no-realm-flow-%d", time.Now().UnixNano())
 		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      flowAlias,
-				Namespace: testNamespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
 				RealmRef:    &keycloakv1beta1.ResourceRef{Name: "nonexistent-realm"},
 				Alias:       flowAlias,
 				Description: "Missing realm flow",
 				ProviderId:  "basic-flow",
-				Executions: []keycloakv1beta1.AuthenticationExecution{
-					{
-						Authenticator: "auth-cookie",
-						Requirement:   "ALTERNATIVE",
-					},
-				},
+				Executions:  rawExecutions(`[{"authenticator":"auth-cookie","requirement":"ALTERNATIVE"}]`),
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, flow))
-		t.Cleanup(func() {
-			k8sClient.Delete(ctx, flow)
-		})
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
 
 		// Should not become ready
 		time.Sleep(5 * time.Second)
@@ -261,5 +328,44 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 		}, updated))
 		require.False(t, updated.Status.Ready, "Flow should not be ready with missing realm")
 		t.Logf("Flow %s correctly not ready: %s", flowAlias, updated.Status.Message)
+	})
+
+	t.Run("InvalidExecutionsShape", func(t *testing.T) {
+		flowAlias := fmt.Sprintf("invalid-flow-%d", time.Now().UnixNano())
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: realmName},
+				Alias:       flowAlias,
+				Description: "Invalid executions shape",
+				ProviderId:  "basic-flow",
+				// requirement field omitted on purpose - the controller
+				// must surface a validation error.
+				Executions: rawExecutions(`[{"authenticator":"auth-cookie"}]`),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      flow.Name,
+				Namespace: flow.Namespace,
+			}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Status == "InvalidSpec", nil
+		})
+		require.NoError(t, err, "Controller did not report InvalidSpec for malformed executions")
+
+		updated := &keycloakv1beta1.KeycloakAuthenticationFlow{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
+			Name:      flow.Name,
+			Namespace: flow.Namespace,
+		}, updated))
+		require.False(t, updated.Status.Ready)
+		require.Contains(t, updated.Status.Message, "requirement is required")
+		t.Logf("Flow %s correctly rejected: %s", flowAlias, updated.Status.Message)
 	})
 }

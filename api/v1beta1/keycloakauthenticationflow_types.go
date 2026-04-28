@@ -1,16 +1,8 @@
 package v1beta1
 
-// NOTE: Unlike other CRDs in this operator, KeycloakAuthenticationFlow uses a typed
-// spec instead of runtime.RawExtension. Most CRDs pass a raw JSON definition through
-// to a single Keycloak REST endpoint. Authentication flows cannot follow that pattern
-// because Keycloak's flow API is procedural -- there is no single endpoint that accepts
-// a complete flow definition. The controller must translate the spec into a sequence of
-// API calls (create flow, add executions, set requirements, reorder, apply authenticator
-// configs). A typed spec provides schema validation and makes the nested flow/execution
-// structure natural to express in YAML.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // KeycloakAuthenticationFlowSpec defines the desired state of KeycloakAuthenticationFlow
@@ -34,80 +26,41 @@ type KeycloakAuthenticationFlowSpec struct {
 	// +optional
 	Description string `json:"description,omitempty"`
 
-	// ProviderId is the flow type: "basic-flow" or "client-flow".
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=basic-flow;client-flow
-	ProviderId string `json:"providerId"`
-
-	// Executions defines the ordered list of authenticator executions and sub-flows.
-	// +optional
-	Executions []AuthenticationExecution `json:"executions,omitempty"`
-}
-
-// AuthenticationExecution defines a single execution step within a flow.
-// Exactly one of Authenticator or SubFlow must be set.
-type AuthenticationExecution struct {
-	// Authenticator is the provider ID (e.g. "auth-cookie", "auth-username-password-form").
-	// Mutually exclusive with SubFlow.
-	// +optional
-	Authenticator string `json:"authenticator,omitempty"`
-
-	// SubFlow defines a nested sub-flow. Mutually exclusive with Authenticator.
-	// Sub-flow children are defined inside SubFlowDefinition.Executions.
-	// +optional
-	SubFlow *SubFlowDefinition `json:"subFlow,omitempty"`
-
-	// Requirement is the execution requirement: REQUIRED, ALTERNATIVE, DISABLED, or CONDITIONAL.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=REQUIRED;ALTERNATIVE;DISABLED;CONDITIONAL
-	Requirement string `json:"requirement"`
-
-	// AuthenticatorConfig contains key-value configuration for the authenticator.
-	// Only valid when Authenticator is set.
-	// +optional
-	AuthenticatorConfig map[string]string `json:"authenticatorConfig,omitempty"`
-}
-
-// SubFlowDefinition identifies a sub-flow to be created within a parent flow.
-// Child executions live here rather than on AuthenticationExecution to avoid a
-// self-referential type, which Kubernetes CRD schemas do not support.
-type SubFlowDefinition struct {
-	// Alias is the unique identifier for this sub-flow.
+	// ProviderId is the top-level flow type. Keycloak ships with "basic-flow"
+	// and "client-flow"; sub-flows may additionally use "form-flow".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	Alias string `json:"alias"`
-
-	// Description is a human-readable description of the sub-flow.
-	// +optional
-	Description string `json:"description,omitempty"`
-
-	// ProviderId is the sub-flow type, typically "basic-flow".
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=basic-flow;client-flow
 	ProviderId string `json:"providerId"`
 
-	// Executions defines the ordered list of authenticator executions within this sub-flow.
+	// Executions is the ordered list of executions for this flow as a JSON
+	// array. Each entry is either a leaf authenticator or a nested sub-flow.
+	//
+	// Leaf authenticator (object fields):
+	//
+	//   authenticator:        Keycloak provider ID, e.g. "auth-cookie".
+	//   requirement:          REQUIRED | ALTERNATIVE | DISABLED | CONDITIONAL.
+	//   authenticatorConfig:  optional map[string]string applied to the
+	//                         execution after creation.
+	//
+	// Sub-flow (object fields):
+	//
+	//   subFlow:              { alias, providerId, description? } — the
+	//                         child flow definition. providerId is typically
+	//                         "basic-flow" or "form-flow"; "form-flow" is
+	//                         required when the children are FormAction
+	//                         providers (e.g. registration-user-creation).
+	//   requirement:          REQUIRED | ALTERNATIVE | DISABLED | CONDITIONAL.
+	//   executions:           ordered list of child executions, recursively
+	//                         using the same shape. As a convenience, child
+	//                         executions may also be placed inside
+	//                         subFlow.executions; if both are present, the
+	//                         inline list precedes the sibling list.
+	//
+	// Nesting depth is unconstrained.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
 	// +optional
-	Executions []SubFlowExecution `json:"executions,omitempty"`
-}
-
-// SubFlowExecution defines an authenticator execution within a sub-flow.
-// Unlike AuthenticationExecution, this type does not support further nesting;
-// Keycloak flows rarely exceed two levels in practice.
-type SubFlowExecution struct {
-	// Authenticator is the provider ID (e.g. "auth-username-password-form").
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Authenticator string `json:"authenticator"`
-
-	// Requirement is the execution requirement: REQUIRED, ALTERNATIVE, DISABLED, or CONDITIONAL.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=REQUIRED;ALTERNATIVE;DISABLED;CONDITIONAL
-	Requirement string `json:"requirement"`
-
-	// AuthenticatorConfig contains key-value configuration for the authenticator.
-	// +optional
-	AuthenticatorConfig map[string]string `json:"authenticatorConfig,omitempty"`
+	Executions runtime.RawExtension `json:"executions,omitempty"`
 }
 
 // KeycloakAuthenticationFlowStatus defines the observed state of KeycloakAuthenticationFlow
@@ -155,8 +108,7 @@ type KeycloakAuthenticationFlowStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=kcaf,categories={keycloak,all}
 
-// KeycloakAuthenticationFlow manages a Keycloak authentication flow via the
-// procedural Admin REST API for flows and executions.
+// KeycloakAuthenticationFlow manages a Keycloak authentication flow.
 type KeycloakAuthenticationFlow struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
