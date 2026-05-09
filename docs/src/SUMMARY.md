@@ -24,6 +24,7 @@
   - [KeycloakRoleMapping](./crds/keycloakrolemapping.md)
   - [KeycloakComponent](./crds/keycloakcomponent.md)
   - [KeycloakIdentityProvider](./crds/keycloakidentityprovider.md)
+  - [KeycloakIdentityProviderMapper](./crds/keycloakidentityprovidermapper.md)
   - [KeycloakOrganization](./crds/keycloakorganization.md)
   - [KeycloakAuthenticationFlow](./crds/keycloakauthenticationflow.md)
   - [KeycloakRequiredAction](./crds/keycloakrequiredaction.md)

@@ -261,6 +261,13 @@ spec:
 
 See [KeycloakAuthenticationFlow](./keycloakauthenticationflow.md) for the flow CRD reference.
 
+## Identity Providers and Mappers
+
+Identity providers themselves can be embedded in `definition.identityProviders` for *initial* realm creation, but Keycloak's `PUT /admin/realms/{realm}` endpoint does **not** consume the `identityProviders` or `identityProviderMappers` fields, so they are silently dropped on realm updates. To declaratively manage identity providers and their mappers on existing realms (including the `master` realm), use the dedicated CRDs:
+
+- [KeycloakIdentityProvider](./keycloakidentityprovider.md) — manages the identity provider instance.
+- [KeycloakIdentityProviderMapper](./keycloakidentityprovidermapper.md) — manages claim, role, and attribute mappers attached to an identity provider.
+
 ## Preserving Realm on Deletion
 
 To keep the realm in Keycloak when deleting the CR:

@@ -782,6 +782,83 @@ func (c *Client) DeleteIdentityProvider(ctx context.Context, realmName, alias st
 }
 
 // ============================================================================
+// Identity Provider Mapper Operations
+// ============================================================================
+
+// IdentityProviderMapperRepresentation represents a Keycloak identity provider mapper
+// (minimal fields we need)
+type IdentityProviderMapperRepresentation struct {
+	ID                     *string           `json:"id,omitempty"`
+	Name                   *string           `json:"name,omitempty"`
+	IdentityProviderAlias  *string           `json:"identityProviderAlias,omitempty"`
+	IdentityProviderMapper *string           `json:"identityProviderMapper,omitempty"`
+	Config                 map[string]string `json:"config,omitempty"`
+}
+
+// idpMappersPath builds the IdP-mappers REST path for a given realm and IdP alias.
+func idpMappersPath(realmName, alias string) string {
+	return "/admin/realms/" + url.PathEscape(realmName) + "/identity-provider/instances/" + url.PathEscape(alias) + "/mappers"
+}
+
+// CreateIdentityProviderMapper creates a mapper on an identity provider
+func (c *Client) CreateIdentityProviderMapper(ctx context.Context, realmName, alias string, mapperDef json.RawMessage) (string, error) {
+	cfg := DefaultRetryConfig()
+	return WithRetry(ctx, cfg, "CreateIdentityProviderMapper", func() (string, error) {
+		return c.Create(ctx, idpMappersPath(realmName, alias), mapperDef)
+	})
+}
+
+// GetIdentityProviderMappers gets all mappers for an identity provider
+func (c *Client) GetIdentityProviderMappers(ctx context.Context, realmName, alias string) ([]IdentityProviderMapperRepresentation, error) {
+	var mappers []IdentityProviderMapperRepresentation
+	if err := c.List(ctx, idpMappersPath(realmName, alias), nil, &mappers); err != nil {
+		return nil, err
+	}
+	return mappers, nil
+}
+
+// GetIdentityProviderMappersRaw gets all mappers for an identity provider as raw JSON
+func (c *Client) GetIdentityProviderMappersRaw(ctx context.Context, realmName, alias string) ([]json.RawMessage, error) {
+	return c.ListRaw(ctx, idpMappersPath(realmName, alias), nil)
+}
+
+// GetIdentityProviderMapper gets a single mapper on an identity provider by ID
+func (c *Client) GetIdentityProviderMapper(ctx context.Context, realmName, alias, mapperID string) (*IdentityProviderMapperRepresentation, error) {
+	var mapper IdentityProviderMapperRepresentation
+	if err := c.Get(ctx, idpMappersPath(realmName, alias)+"/"+url.PathEscape(mapperID), &mapper); err != nil {
+		return nil, err
+	}
+	return &mapper, nil
+}
+
+// GetIdentityProviderMapperByName finds a mapper by name on an identity provider
+func (c *Client) GetIdentityProviderMapperByName(ctx context.Context, realmName, alias, name string) (*IdentityProviderMapperRepresentation, error) {
+	mappers, err := c.GetIdentityProviderMappers(ctx, realmName, alias)
+	if err != nil {
+		return nil, err
+	}
+	for i := range mappers {
+		if mappers[i].Name != nil && *mappers[i].Name == name {
+			return &mappers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("identity provider mapper not found: %s", name)
+}
+
+// UpdateIdentityProviderMapper updates a mapper on an identity provider
+func (c *Client) UpdateIdentityProviderMapper(ctx context.Context, realmName, alias, mapperID string, mapperDef json.RawMessage) error {
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "UpdateIdentityProviderMapper", func() error {
+		return c.Update(ctx, idpMappersPath(realmName, alias)+"/"+url.PathEscape(mapperID), mapperDef)
+	})
+}
+
+// DeleteIdentityProviderMapper deletes a mapper from an identity provider
+func (c *Client) DeleteIdentityProviderMapper(ctx context.Context, realmName, alias, mapperID string) error {
+	return c.Delete(ctx, idpMappersPath(realmName, alias)+"/"+url.PathEscape(mapperID))
+}
+
+// ============================================================================
 // Role Operations
 // ============================================================================
 

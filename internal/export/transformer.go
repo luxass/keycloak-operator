@@ -313,6 +313,43 @@ func (t *Transformer) TransformIdentityProvider(raw json.RawMessage) (ExportedRe
 	}, nil
 }
 
+// TransformIdentityProviderMapper transforms an identity provider mapper JSON
+// to KeycloakIdentityProviderMapper.
+func (t *Transformer) TransformIdentityProviderMapper(raw json.RawMessage, alias string) (ExportedResource, error) {
+	var parsed struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return ExportedResource{}, err
+	}
+
+	definition := removeServerFields(raw, "id")
+
+	mapper := &keycloakv1beta1.KeycloakIdentityProviderMapper{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "keycloak.hostzero.com/v1beta1",
+			Kind:       "KeycloakIdentityProviderMapper",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sanitizeName(alias + "-" + parsed.Name),
+			Namespace: t.opts.TargetNamespace,
+		},
+		Spec: keycloakv1beta1.KeycloakIdentityProviderMapperSpec{
+			IdentityProviderRef: keycloakv1beta1.ResourceRef{
+				Name: sanitizeName(alias),
+			},
+			Definition: runtime.RawExtension{Raw: definition},
+		},
+	}
+
+	return ExportedResource{
+		Kind:       "KeycloakIdentityProviderMapper",
+		Name:       mapper.Name,
+		APIVersion: "keycloak.hostzero.com/v1beta1",
+		Object:     mapper,
+	}, nil
+}
+
 // TransformComponent transforms a component JSON to KeycloakComponent
 func (t *Transformer) TransformComponent(raw json.RawMessage) (ExportedResource, error) {
 	var parsed struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -204,6 +205,184 @@ func TestListAll_ServerError(t *testing.T) {
 	c := newTestClient(t, srv.URL)
 	_, err := listAll[thing](context.Background(), c, "/admin/realms/test/things", nil)
 	require.Error(t, err)
+}
+
+// TestIdentityProviderMappers_CRUD exercises the full create/list/get/update/
+// delete cycle of the IdP-mapper Admin REST API path, which is keyed by the
+// parent IdP alias rather than by realm-scoped UUIDs.
+func TestIdentityProviderMappers_CRUD(t *testing.T) {
+	const realm = "master"
+	const alias = "oidc"
+
+	type stored struct {
+		ID                     string            `json:"id,omitempty"`
+		Name                   string            `json:"name,omitempty"`
+		IdentityProviderAlias  string            `json:"identityProviderAlias,omitempty"`
+		IdentityProviderMapper string            `json:"identityProviderMapper,omitempty"`
+		Config                 map[string]string `json:"config,omitempty"`
+	}
+
+	store := map[string]stored{}
+	idCounter := 0
+	base := "/admin/realms/" + realm + "/identity-provider/instances/" + alias + "/mappers"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/master/protocol/openid-connect/token" {
+			_, _ = w.Write([]byte(`{"access_token":"test","expires_in":300,"token_type":"Bearer"}`))
+			return
+		}
+
+		if r.URL.Path == base {
+			switch r.Method {
+			case http.MethodPost:
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				var s stored
+				require.NoError(t, json.Unmarshal(body, &s), "POST body was: %q", string(body))
+				idCounter++
+				s.ID = fmt.Sprintf("mid-%d", idCounter)
+				store[s.ID] = s
+				w.Header().Set("Location", r.URL.Path+"/"+s.ID)
+				w.WriteHeader(http.StatusCreated)
+				return
+			case http.MethodGet:
+				items := make([]stored, 0, len(store))
+				for _, v := range store {
+					items = append(items, v)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(items)
+				return
+			}
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if len(r.URL.Path) > len(base+"/") && r.URL.Path[:len(base+"/")] == base+"/" {
+			id := r.URL.Path[len(base+"/"):]
+			switch r.Method {
+			case http.MethodGet:
+				s, ok := store[id]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(s)
+				return
+			case http.MethodPut:
+				var s stored
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&s))
+				s.ID = id
+				store[id] = s
+				w.WriteHeader(http.StatusNoContent)
+				return
+			case http.MethodDelete:
+				if _, ok := store[id]; !ok {
+					http.NotFound(w, r)
+					return
+				}
+				delete(store, id)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv.URL)
+	ctx := context.Background()
+
+	createDef, err := json.Marshal(map[string]any{
+		"name":                   "role-mapper",
+		"identityProviderMapper": "oidc-role-idp-mapper",
+		"identityProviderAlias":  alias,
+		"config": map[string]string{
+			"syncMode":    "FORCE",
+			"claim":       "roles",
+			"claim.value": "admin",
+			"role":        "realm-admin",
+		},
+	})
+	require.NoError(t, err)
+
+	id, err := c.CreateIdentityProviderMapper(ctx, realm, alias, createDef)
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	mappers, err := c.GetIdentityProviderMappers(ctx, realm, alias)
+	require.NoError(t, err)
+	require.Len(t, mappers, 1)
+	require.NotNil(t, mappers[0].Name)
+	assert.Equal(t, "role-mapper", *mappers[0].Name)
+
+	got, err := c.GetIdentityProviderMapper(ctx, realm, alias, id)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.IdentityProviderMapper)
+	assert.Equal(t, "oidc-role-idp-mapper", *got.IdentityProviderMapper)
+	assert.Equal(t, "FORCE", got.Config["syncMode"])
+
+	byName, err := c.GetIdentityProviderMapperByName(ctx, realm, alias, "role-mapper")
+	require.NoError(t, err)
+	require.NotNil(t, byName)
+	require.NotNil(t, byName.ID)
+	assert.Equal(t, id, *byName.ID)
+
+	updateDef, err := json.Marshal(map[string]any{
+		"id":                     id,
+		"name":                   "role-mapper",
+		"identityProviderMapper": "oidc-role-idp-mapper",
+		"identityProviderAlias":  alias,
+		"config": map[string]string{
+			"syncMode":    "INHERIT",
+			"claim":       "roles",
+			"claim.value": "admin",
+			"role":        "realm-admin",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.UpdateIdentityProviderMapper(ctx, realm, alias, id, updateDef))
+
+	got, err = c.GetIdentityProviderMapper(ctx, realm, alias, id)
+	require.NoError(t, err)
+	assert.Equal(t, "INHERIT", got.Config["syncMode"])
+
+	require.NoError(t, c.DeleteIdentityProviderMapper(ctx, realm, alias, id))
+
+	mappers, err = c.GetIdentityProviderMappers(ctx, realm, alias)
+	require.NoError(t, err)
+	assert.Empty(t, mappers)
+
+	_, err = c.GetIdentityProviderMapperByName(ctx, realm, alias, "role-mapper")
+	require.Error(t, err)
+}
+
+// TestIdentityProviderMappers_PathEscaping verifies that the alias is URL-
+// path-escaped, since IdP aliases may legitimately contain characters like
+// dots that should not need escaping but slash characters must be encoded.
+func TestIdentityProviderMappers_PathEscaping(t *testing.T) {
+	var seenPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/master/protocol/openid-connect/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"test","expires_in":300,"token_type":"Bearer"}`))
+	})
+	mux.HandleFunc("/admin/realms/my-realm/identity-provider/instances/my%2Fweird%20alias/mappers", func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]IdentityProviderMapperRepresentation{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv.URL)
+	_, err := c.GetIdentityProviderMappers(context.Background(), "my-realm", "my/weird alias")
+	require.NoError(t, err)
+	assert.Equal(t, "/admin/realms/my-realm/identity-provider/instances/my%2Fweird%20alias/mappers", seenPath)
 }
 
 // TestGetClients_Paginated wires the production GetClients helper end to end

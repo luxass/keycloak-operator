@@ -1,0 +1,16 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakIdentityProviderMapper
+metadata:
+  name: mdm-support-role-mapper
+  namespace: keycloak
+spec:
+  identityProviderRef:
+    name: oidc
+  definition:
+    name: mdm-support-role-mapper
+    identityProviderMapper: oidc-role-idp-mapper
+    config:
+      syncMode: FORCE
+      claim: roles
+      claim.value: mdmsupport
+      role: mdm-realm.mdm-support

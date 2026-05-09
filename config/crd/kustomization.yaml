@@ -13,6 +13,7 @@ resources:
   - bases/keycloak.hostzero.com_keycloakclientscopes.yaml
   - bases/keycloak.hostzero.com_keycloakgroups.yaml
   - bases/keycloak.hostzero.com_keycloakidentityproviders.yaml
+  - bases/keycloak.hostzero.com_keycloakidentityprovidermappers.yaml
   - bases/keycloak.hostzero.com_keycloakroles.yaml
   - bases/keycloak.hostzero.com_keycloakprotocolmappers.yaml
   - bases/keycloak.hostzero.com_keycloakcomponents.yaml

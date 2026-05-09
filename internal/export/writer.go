@@ -149,6 +149,8 @@ func kindToDirectory(kind string) string {
 		return "client-scopes"
 	case "IdentityProvider":
 		return "identity-providers"
+	case "IdentityProviderMapper":
+		return "identity-provider-mappers"
 	case "ProtocolMapper":
 		return "protocol-mappers"
 	case "RoleMapping":

@@ -4,17 +4,18 @@ import "strings"
 
 // Resource type constants
 const (
-	ResourceTypeRealm             = "realm"
-	ResourceTypeClients           = "clients"
-	ResourceTypeClientScopes      = "client-scopes"
-	ResourceTypeUsers             = "users"
-	ResourceTypeGroups            = "groups"
-	ResourceTypeRoles             = "roles"
-	ResourceTypeRoleMappings      = "role-mappings"
-	ResourceTypeIdentityProviders = "identity-providers"
-	ResourceTypeComponents        = "components"
-	ResourceTypeProtocolMappers   = "protocol-mappers"
-	ResourceTypeOrganizations     = "organizations"
+	ResourceTypeRealm                   = "realm"
+	ResourceTypeClients                 = "clients"
+	ResourceTypeClientScopes            = "client-scopes"
+	ResourceTypeUsers                   = "users"
+	ResourceTypeGroups                  = "groups"
+	ResourceTypeRoles                   = "roles"
+	ResourceTypeRoleMappings            = "role-mappings"
+	ResourceTypeIdentityProviders       = "identity-providers"
+	ResourceTypeIdentityProviderMappers = "identity-provider-mappers"
+	ResourceTypeComponents              = "components"
+	ResourceTypeProtocolMappers         = "protocol-mappers"
+	ResourceTypeOrganizations           = "organizations"
 )
 
 // Default Keycloak built-in clients to skip

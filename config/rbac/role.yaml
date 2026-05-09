@@ -26,6 +26,7 @@ rules:
   - keycloakclientscopes
   - keycloakcomponents
   - keycloakgroups
+  - keycloakidentityprovidermappers
   - keycloakidentityproviders
   - keycloakinstances
   - keycloakorganizations
@@ -54,6 +55,7 @@ rules:
   - keycloakclientscopes/finalizers
   - keycloakcomponents/finalizers
   - keycloakgroups/finalizers
+  - keycloakidentityprovidermappers/finalizers
   - keycloakidentityproviders/finalizers
   - keycloakinstances/finalizers
   - keycloakorganizations/finalizers
@@ -76,6 +78,7 @@ rules:
   - keycloakclientscopes/status
   - keycloakcomponents/status
   - keycloakgroups/status
+  - keycloakidentityprovidermappers/status
   - keycloakidentityproviders/status
   - keycloakinstances/status
   - keycloakorganizations/status

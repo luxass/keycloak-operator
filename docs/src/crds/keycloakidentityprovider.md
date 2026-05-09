@@ -207,4 +207,4 @@ kubectl get kcidp
 
 - Use `configSecretRef` to store sensitive values like `clientId` and `clientSecret` in a Kubernetes Secret (see [Config from Secret](#config-from-secret))
 - Consider using `syncMode: IMPORT` to import users on first login
-- Configure mappers to transform claims from the external provider
+- Mappers must be managed via [KeycloakIdentityProviderMapper](./keycloakidentityprovidermapper.md). Embedding `mappers` inside this CR's `definition` is silently ignored by Keycloak on update — the field is only consumed during realm import.

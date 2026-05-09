@@ -199,6 +199,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controller.KeycloakIdentityProviderMapperReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		ClientManager: clientManager,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "KeycloakIdentityProviderMapper")
+		os.Exit(1)
+	}
+
 	if err = (&controller.KeycloakRoleReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),

@@ -476,6 +476,41 @@ func (e *Exporter) exportIdentityProviders(ctx context.Context) ([]ExportedResou
 			continue
 		}
 		resources = append(resources, resource)
+
+		if e.filter.ShouldIncludeType(ResourceTypeIdentityProviderMappers) {
+			mappers, err := e.exportIdentityProviderMappers(ctx, idp.Alias)
+			if err != nil {
+				e.log.Error(err, "Failed to export identity provider mappers", "alias", idp.Alias)
+			} else {
+				resources = append(resources, mappers...)
+			}
+		}
+	}
+
+	return resources, nil
+}
+
+func (e *Exporter) exportIdentityProviderMappers(ctx context.Context, alias string) ([]ExportedResource, error) {
+	rawMappers, err := e.client.GetIdentityProviderMappersRaw(ctx, e.opts.Realm, alias)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get identity provider mappers: %w", err)
+	}
+
+	var resources []ExportedResource
+	for _, raw := range rawMappers {
+		var mapper struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &mapper); err != nil {
+			continue
+		}
+
+		resource, err := e.transformer.TransformIdentityProviderMapper(raw, alias)
+		if err != nil {
+			e.log.Error(err, "Failed to transform identity provider mapper", "alias", alias, "name", mapper.Name)
+			continue
+		}
+		resources = append(resources, resource)
 	}
 
 	return resources, nil
