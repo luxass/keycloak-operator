@@ -141,7 +141,7 @@ func (r *ClusterKeycloakRealmReconciler) Reconcile(ctx context.Context, req ctrl
 		if fetchErr != nil {
 			log.Error(fetchErr, "failed to fetch current realm state, falling through to update")
 		} else if currentRaw != nil {
-			needsUpdate = !definitionsMatch(definition, currentRaw)
+			needsUpdate = !realmDefinitionsMatch(definition, currentRaw)
 		}
 
 		if needsUpdate {

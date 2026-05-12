@@ -131,8 +131,13 @@ func (r *KeycloakRoleMappingReconciler) Reconcile(ctx context.Context, req ctrl.
 			} else {
 				existingRoles, checkErr = kc.GetUserRealmRoleMappings(ctx, realmName, subjectID)
 			}
+		} else {
+			if roleType == "client" {
+				existingRoles, checkErr = kc.GetGroupClientRoleMappings(ctx, realmName, subjectID, clientUUID)
+			} else {
+				existingRoles, checkErr = kc.GetGroupRealmRoleMappings(ctx, realmName, subjectID)
+			}
 		}
-		// For groups we skip the check and always apply (no GetGroupRoleMappings available)
 		if checkErr == nil && existingRoles != nil {
 			for _, er := range existingRoles {
 				if er.ID != nil && *er.ID == *role.ID {

@@ -770,10 +770,17 @@ func valuesMatch(desired, current interface{}) bool {
 		return true
 	}
 
-	// Arrays of objects (e.g. protocolMappers): match by "name" field, then subset-compare
+	// Arrays of objects (e.g. protocolMappers): match by "name" field, require same
+	// length so that extra objects in Keycloak (e.g. an orphaned protocolMapper that
+	// the CR no longer declares) are detected as drift and removed by the PUT.
+	// Within each matched object, fields are still subset-compared because Keycloak
+	// adds fields the CR omits (id, consentRequired, ...).
 	desiredObjArr, dIsObjArr := toObjectSlice(desired)
 	currentObjArr, cIsObjArr := toObjectSlice(current)
 	if dIsObjArr && cIsObjArr {
+		if len(desiredObjArr) != len(currentObjArr) {
+			return false
+		}
 		for _, dObj := range desiredObjArr {
 			dName, _ := dObj["name"].(string)
 			found := false

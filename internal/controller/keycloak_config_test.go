@@ -756,3 +756,35 @@ func TestSetReadyCondition(t *testing.T) {
 		}
 	})
 }
+
+func TestRealmDefinitionsMatch_SmtpPasswordMasked(t *testing.T) {
+	// Desired carries the real password (just merged from smtpSecretRef);
+	// current is masked. realmDefinitionsMatch must treat them as equal.
+	desired := json.RawMessage(`{"realm":"r","smtpServer":{"host":"smtp.example.com","user":"u","password":"plaintext"}}`)
+	current := json.RawMessage(`{"realm":"r","smtpServer":{"host":"smtp.example.com","user":"u","password":"**********"}}`)
+
+	if !realmDefinitionsMatch(desired, current) {
+		t.Error("expected match: smtpServer.password mask should be ignored on the current side")
+	}
+}
+
+func TestRealmDefinitionsMatch_SmtpPasswordUnmasked(t *testing.T) {
+	// If current is not masked (e.g. realm freshly created, no password yet),
+	// the diff must fire so the PUT pushes the password.
+	desired := json.RawMessage(`{"realm":"r","smtpServer":{"host":"smtp.example.com","user":"u","password":"plaintext"}}`)
+	current := json.RawMessage(`{"realm":"r","smtpServer":{"host":"smtp.example.com","user":"u"}}`)
+
+	if realmDefinitionsMatch(desired, current) {
+		t.Error("expected no match: current has no password, desired must push it")
+	}
+}
+
+func TestRealmDefinitionsMatch_NonSmtpFieldDiff(t *testing.T) {
+	// Non-smtp field drift must still be detected even when smtp is masked.
+	desired := json.RawMessage(`{"realm":"r","displayName":"new","smtpServer":{"password":"plaintext"}}`)
+	current := json.RawMessage(`{"realm":"r","displayName":"old","smtpServer":{"password":"**********"}}`)
+
+	if realmDefinitionsMatch(desired, current) {
+		t.Error("expected no match: displayName differs")
+	}
+}

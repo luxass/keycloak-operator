@@ -487,6 +487,47 @@ func idpDefinitionsMatch(desired, current json.RawMessage) bool {
 	return definitionsMatch(desiredJSON, currentJSON)
 }
 
+// realmDefinitionsMatch compares two RealmRepresentations for drift-detection,
+// stripping fields that Keycloak masks on GET so they don't cause false-positive drift.
+//
+// Keycloak masks `smtpServer.password` as "**********" on GET when an SMTP password
+// is configured. If the operator merges a real password from smtpSecretRef into the
+// desired definition, a naive comparison would always report drift and force an
+// UpdateRealm every reconcile.
+//
+// We strip smtpServer.password from BOTH sides ONLY when current shows the mask:
+// Keycloak has *some* password stored, we can't observe its value, so treat as equal
+// on that field. If current is null/missing, the realm genuinely has no password
+// stored and the PUT must push it — leave the field intact so the diff fires.
+func realmDefinitionsMatch(desired, current json.RawMessage) bool {
+	var desiredMap, currentMap map[string]interface{}
+	if err := json.Unmarshal(desired, &desiredMap); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(current, &currentMap); err != nil {
+		return false
+	}
+
+	if cSmtp, ok := currentMap["smtpServer"].(map[string]interface{}); ok {
+		if pw, ok := cSmtp["password"].(string); ok && pw == "**********" {
+			delete(cSmtp, "password")
+			if dSmtp, ok := desiredMap["smtpServer"].(map[string]interface{}); ok {
+				delete(dSmtp, "password")
+			}
+		}
+	}
+
+	desiredJSON, err := json.Marshal(desiredMap)
+	if err != nil {
+		return false
+	}
+	currentJSON, err := json.Marshal(currentMap)
+	if err != nil {
+		return false
+	}
+	return definitionsMatch(desiredJSON, currentJSON)
+}
+
 // removeFieldFromDefinition removes a field from a JSON definition.
 // If the field doesn't exist or the JSON is invalid, the original is returned unchanged.
 func removeFieldFromDefinition(definition json.RawMessage, field string) json.RawMessage {

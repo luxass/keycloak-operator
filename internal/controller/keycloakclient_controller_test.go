@@ -162,3 +162,42 @@ func TestDefinitionsMatch_SkipsOptionalClientScopes(t *testing.T) {
 		t.Error("expected match: optionalClientScopes should be skipped in comparison")
 	}
 }
+
+func TestDefinitionsMatch_ProtocolMappersExtraInCurrent(t *testing.T) {
+	// Keycloak has an extra protocolMapper that the CR no longer declares.
+	// definitionsMatch must report drift so the PUT removes it.
+	desired := json.RawMessage(`{
+		"clientId": "app",
+		"protocolMappers": [{"name": "keep", "protocol": "openid-connect"}]
+	}`)
+	current := json.RawMessage(`{
+		"clientId": "app",
+		"protocolMappers": [
+			{"name": "keep", "protocol": "openid-connect"},
+			{"name": "orphan", "protocol": "openid-connect"}
+		]
+	}`)
+
+	if definitionsMatch(desired, current) {
+		t.Error("expected no match: orphan protocolMapper in current must surface as drift")
+	}
+}
+
+func TestDefinitionsMatch_ProtocolMappersExtraInDesired(t *testing.T) {
+	// CR adds a protocolMapper that Keycloak doesn't have yet — must surface as drift.
+	desired := json.RawMessage(`{
+		"clientId": "app",
+		"protocolMappers": [
+			{"name": "existing", "protocol": "openid-connect"},
+			{"name": "new-one", "protocol": "openid-connect"}
+		]
+	}`)
+	current := json.RawMessage(`{
+		"clientId": "app",
+		"protocolMappers": [{"name": "existing", "protocol": "openid-connect"}]
+	}`)
+
+	if definitionsMatch(desired, current) {
+		t.Error("expected no match: CR adds a protocolMapper that current lacks")
+	}
+}
