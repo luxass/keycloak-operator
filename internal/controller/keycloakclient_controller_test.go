@@ -237,3 +237,25 @@ func TestIsPublicClient_NilSpec(t *testing.T) {
 		t.Error("expected false for nil Definition")
 	}
 }
+
+func TestIsPublicClient_EmptyRaw(t *testing.T) {
+	// Definition is non-nil but Raw is empty — exercises the
+	// len(kcClient.Spec.Definition.Raw) == 0 branch that the table-driven
+	// "definition empty" case skips (since it leaves Definition nil).
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "nil raw", raw: nil},
+		{name: "empty raw", raw: []byte{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kc := &keycloakv1beta1.KeycloakClient{}
+			kc.Spec.Definition = &runtime.RawExtension{Raw: tc.raw}
+			if isPublicClient(kc) {
+				t.Errorf("expected false for non-nil Definition with %s", tc.name)
+			}
+		})
+	}
+}
