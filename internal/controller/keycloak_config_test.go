@@ -654,6 +654,10 @@ func TestStripRealmFlowBindingsForCreate(t *testing.T) {
 		"browserFlow": "custom browser",
 		"registrationFlow": "custom registration",
 		"directGrantFlow": "custom direct grant",
+		"resetCredentialsFlow": "custom reset credentials",
+		"clientAuthenticationFlow": "custom client auth",
+		"dockerAuthenticationFlow": "custom docker auth",
+		"firstBrokerLoginFlow": "custom first broker login",
 		"displayName": "Example"
 	}`)
 
@@ -667,7 +671,15 @@ func TestStripRealmFlowBindingsForCreate(t *testing.T) {
 		t.Fatalf("failed to parse result: %v", err)
 	}
 
-	for _, field := range []string{"browserFlow", "registrationFlow", "directGrantFlow"} {
+	for _, field := range []string{
+		"browserFlow",
+		"registrationFlow",
+		"directGrantFlow",
+		"resetCredentialsFlow",
+		"clientAuthenticationFlow",
+		"dockerAuthenticationFlow",
+		"firstBrokerLoginFlow",
+	} {
 		if _, ok := got[field]; ok {
 			t.Fatalf("%s should have been removed", field)
 		}

@@ -576,6 +576,7 @@ var realmFlowBindingFields = []string{
 	"resetCredentialsFlow",
 	"clientAuthenticationFlow",
 	"dockerAuthenticationFlow",
+	"firstBrokerLoginFlow",
 }
 
 // stripRealmFlowBindingsForCreate removes top-level realm flow bindings from an

@@ -240,6 +240,71 @@ func TestKeycloakAuthenticationFlowE2E(t *testing.T) {
 		t.Logf("Realm %s bound browserFlow to %s", customRealmName, flowAlias)
 	})
 
+	// Regression: a realm referencing a not-yet-created
+	// firstBrokerLoginFlow must defer the binding instead of
+	// crashing Keycloak during realm import.
+	t.Run("RealmWithDeferredCustomFirstBrokerLoginFlow", func(t *testing.T) {
+		skipIfNoKeycloakAccess(t)
+
+		customRealmName := fmt.Sprintf("test-realm-fbl-binding-%d", time.Now().UnixNano())
+		flowAlias := fmt.Sprintf("custom-fbl-%d", time.Now().UnixNano())
+		realm := &keycloakv1beta1.KeycloakRealm{
+			ObjectMeta: metav1.ObjectMeta{Name: customRealmName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRealmSpec{
+				InstanceRef: &keycloakv1beta1.ResourceRef{Name: instanceName, Namespace: &instanceNS},
+				Definition: rawJSON(fmt.Sprintf(`{
+					"realm": "%s",
+					"enabled": true,
+					"firstBrokerLoginFlow": "%s"
+				}`, customRealmName, flowAlias)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, realm))
+		t.Cleanup(func() { k8sClient.Delete(ctx, realm) })
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRealm{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      realm.Name,
+				Namespace: realm.Namespace,
+			}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "Realm with deferred custom firstBrokerLoginFlow did not become ready")
+
+		flow := &keycloakv1beta1.KeycloakAuthenticationFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: flowAlias, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakAuthenticationFlowSpec{
+				RealmRef:    &keycloakv1beta1.ResourceRef{Name: customRealmName},
+				Alias:       flowAlias,
+				Description: "Custom first-broker-login flow bound by KeycloakRealm",
+				ProviderId:  "basic-flow",
+				Executions:  rawExecutions(`[{"authenticator":"idp-create-user-if-unique","requirement":"ALTERNATIVE"}]`),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, flow))
+		t.Cleanup(func() { k8sClient.Delete(ctx, flow) })
+
+		waitForFlowReady(t, flow.Name)
+
+		kc := getInternalKeycloakClient(t)
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			realmRaw, err := kc.GetRealmRaw(ctx, customRealmName)
+			if err != nil {
+				return false, nil
+			}
+			var realmData map[string]interface{}
+			if err := json.Unmarshal(realmRaw, &realmData); err != nil {
+				return false, err
+			}
+			return realmData["firstBrokerLoginFlow"] == flowAlias, nil
+		})
+		require.NoError(t, err, "Realm did not bind firstBrokerLoginFlow to the custom flow")
+		t.Logf("Realm %s bound firstBrokerLoginFlow to %s", customRealmName, flowAlias)
+	})
+
 	t.Run("FlowWithKeycloakVerification", func(t *testing.T) {
 		skipIfNoKeycloakAccess(t)
 
