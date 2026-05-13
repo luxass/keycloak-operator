@@ -102,6 +102,8 @@ func TestKeycloakRoleMappingE2E(t *testing.T) {
 		require.Equal(t, "user", updatedMapping.Status.SubjectType)
 		require.Equal(t, "realm", updatedMapping.Status.RoleType)
 		require.Equal(t, "offline_access", updatedMapping.Status.RoleName)
+		// Verify Ready condition is set so `kubectl wait --for=condition=Ready` works
+		requireReadyCondition(t, updatedMapping.Status.Conditions, metav1.ConditionTrue)
 		t.Logf("Role mapping %s is ready, subject: %s, role: %s", mappingName, updatedMapping.Status.SubjectType, updatedMapping.Status.RoleName)
 	})
 
@@ -227,6 +229,9 @@ func TestKeycloakRoleMappingE2E(t *testing.T) {
 			Namespace: roleMapping.Namespace,
 		}, updated))
 		require.False(t, updated.Status.Ready)
+		// The Ready condition should still be present, but with status False so users
+		// can detect the failure via `kubectl wait --for=condition=Ready=False`
+		requireReadyCondition(t, updated.Status.Conditions, metav1.ConditionFalse)
 		t.Logf("Role mapping correctly failed with: %s", updated.Status.Message)
 	})
 

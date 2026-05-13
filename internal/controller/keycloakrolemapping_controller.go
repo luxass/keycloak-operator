@@ -421,6 +421,8 @@ func (r *KeycloakRoleMappingReconciler) updateStatus(ctx context.Context, mappin
 		mapping.Status.ObservedGeneration = mapping.Generation
 	}
 
+	mapping.Status.Conditions = setReadyCondition(mapping.Status.Conditions, ready, status, message)
+
 	if err := r.Status().Update(ctx, mapping); err != nil {
 		return ctrl.Result{}, err
 	}

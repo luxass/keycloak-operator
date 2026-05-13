@@ -420,6 +420,21 @@ func rawJSON(s string) runtime.RawExtension {
 	return runtime.RawExtension{Raw: []byte(s)}
 }
 
+func requireReadyCondition(t *testing.T, conditions []metav1.Condition, expected metav1.ConditionStatus) {
+	t.Helper()
+	for _, c := range conditions {
+		if c.Type == "Ready" {
+			require.Equalf(t, expected, c.Status,
+				"Ready condition status mismatch (reason=%q, message=%q)", c.Reason, c.Message)
+			require.NotEmpty(t, c.Reason, "Ready condition should have a reason")
+			require.False(t, c.LastTransitionTime.IsZero(), "Ready condition should have LastTransitionTime set")
+			return
+		}
+	}
+	t.Fatalf("expected a %q condition with status %q, but none was found in %+v",
+		"Ready", expected, conditions)
+}
+
 // getSecretKeys returns the keys in a secret's data
 func getSecretKeys(secret *corev1.Secret) []string {
 	keys := make([]string, 0, len(secret.Data))

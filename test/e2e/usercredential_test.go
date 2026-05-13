@@ -115,6 +115,8 @@ func TestKeycloakUserCredentialE2E(t *testing.T) {
 			Namespace: kcCred.Namespace,
 		}, updatedCred))
 		require.True(t, updatedCred.Status.SecretCreated, "SecretCreated should be true")
+		// Verify Ready condition is set so `kubectl wait --for=condition=Ready` works
+		requireReadyCondition(t, updatedCred.Status.Conditions, metav1.ConditionTrue)
 	})
 
 	t.Run("UseExistingSecret", func(t *testing.T) {
@@ -280,6 +282,9 @@ func TestKeycloakUserCredentialE2E(t *testing.T) {
 
 		require.False(t, updatedCred.Status.Ready, "Should not be ready when secret is missing")
 		require.Equal(t, "SecretError", updatedCred.Status.Status)
+		// The Ready condition should still be set, but with status False so users
+		// can detect the failure via `kubectl wait --for=condition=Ready=False`
+		requireReadyCondition(t, updatedCred.Status.Conditions, metav1.ConditionFalse)
 	})
 }
 

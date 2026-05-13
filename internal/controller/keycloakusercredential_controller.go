@@ -411,6 +411,8 @@ func (r *KeycloakUserCredentialReconciler) updateStatus(ctx context.Context, cre
 		cred.Status.ObservedGeneration = observedGeneration
 	}
 
+	cred.Status.Conditions = setReadyCondition(cred.Status.Conditions, ready, status, message)
+
 	if err := r.Status().Update(ctx, cred); err != nil {
 		return ctrl.Result{}, err
 	}
