@@ -926,6 +926,92 @@ func (c *Client) DeleteClientRole(ctx context.Context, realmName, clientID, role
 	return c.Delete(ctx, "/admin/realms/"+url.PathEscape(realmName)+"/clients/"+url.PathEscape(clientID)+"/roles/"+url.PathEscape(roleName))
 }
 
+func realmRoleCompositesPath(realmName, roleName string) string {
+	return "/admin/realms/" + url.PathEscape(realmName) + "/roles/" + url.PathEscape(roleName) + "/composites"
+}
+
+func clientRoleCompositesPath(realmName, clientID, roleName string) string {
+	return "/admin/realms/" + url.PathEscape(realmName) + "/clients/" + url.PathEscape(clientID) + "/roles/" + url.PathEscape(roleName) + "/composites"
+}
+
+// GetRealmRoleComposites lists composite members of a realm role.
+func (c *Client) GetRealmRoleComposites(ctx context.Context, realmName, roleName string) ([]RoleRepresentation, error) {
+	var roles []RoleRepresentation
+	if err := c.Get(ctx, realmRoleCompositesPath(realmName, roleName), &roles); err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+// AddRealmRoleComposites adds composite members to a realm role.
+func (c *Client) AddRealmRoleComposites(ctx context.Context, realmName, roleName string, roles []RoleRepresentation) error {
+	if len(roles) == 0 {
+		return nil
+	}
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "AddRealmRoleComposites", func() error {
+		return c.Post(ctx, realmRoleCompositesPath(realmName, roleName), roles, nil)
+	})
+}
+
+// RemoveRealmRoleComposites removes composite members from a realm role.
+func (c *Client) RemoveRealmRoleComposites(ctx context.Context, realmName, roleName string, roles []RoleRepresentation) error {
+	if len(roles) == 0 {
+		return nil
+	}
+	req, err := c.request(ctx)
+	if err != nil {
+		return err
+	}
+	resp, err := req.SetBody(roles).Delete(c.baseURL + realmRoleCompositesPath(realmName, roleName))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if resp.IsError() {
+		return fmt.Errorf("%s: %s", resp.Status(), string(resp.Body()))
+	}
+	return nil
+}
+
+// GetClientRoleComposites lists composite members of a client role.
+func (c *Client) GetClientRoleComposites(ctx context.Context, realmName, clientID, roleName string) ([]RoleRepresentation, error) {
+	var roles []RoleRepresentation
+	if err := c.Get(ctx, clientRoleCompositesPath(realmName, clientID, roleName), &roles); err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+// AddClientRoleComposites adds composite members to a client role.
+func (c *Client) AddClientRoleComposites(ctx context.Context, realmName, clientID, roleName string, roles []RoleRepresentation) error {
+	if len(roles) == 0 {
+		return nil
+	}
+	cfg := DefaultRetryConfig()
+	return WithRetryVoid(ctx, cfg, "AddClientRoleComposites", func() error {
+		return c.Post(ctx, clientRoleCompositesPath(realmName, clientID, roleName), roles, nil)
+	})
+}
+
+// RemoveClientRoleComposites removes composite members from a client role.
+func (c *Client) RemoveClientRoleComposites(ctx context.Context, realmName, clientID, roleName string, roles []RoleRepresentation) error {
+	if len(roles) == 0 {
+		return nil
+	}
+	req, err := c.request(ctx)
+	if err != nil {
+		return err
+	}
+	resp, err := req.SetBody(roles).Delete(c.baseURL + clientRoleCompositesPath(realmName, clientID, roleName))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if resp.IsError() {
+		return fmt.Errorf("%s: %s", resp.Status(), string(resp.Body()))
+	}
+	return nil
+}
+
 // ============================================================================
 // Role Mapping Operations
 // ============================================================================

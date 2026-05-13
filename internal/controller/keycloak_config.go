@@ -528,6 +528,35 @@ func realmDefinitionsMatch(desired, current json.RawMessage) bool {
 	return definitionsMatch(desiredJSON, currentJSON)
 }
 
+// roleCompositesSpec mirrors the "composites" field of a Keycloak
+// RoleRepresentation: realm roles by name and client roles keyed by clientId.
+type roleCompositesSpec struct {
+	Realm  []string            `json:"realm,omitempty"`
+	Client map[string][]string `json:"client,omitempty"`
+}
+
+// extractRoleComposites returns the desired composite members and whether the
+// definition opted into composite handling (via composite: true or a non-empty
+// composites object).
+func extractRoleComposites(definition json.RawMessage) (composites roleCompositesSpec, requested bool) {
+	if len(definition) == 0 {
+		return roleCompositesSpec{}, false
+	}
+	var raw struct {
+		Composite  *bool               `json:"composite,omitempty"`
+		Composites *roleCompositesSpec `json:"composites,omitempty"`
+	}
+	if err := json.Unmarshal(definition, &raw); err != nil {
+		return roleCompositesSpec{}, false
+	}
+	if raw.Composites != nil {
+		composites = *raw.Composites
+	}
+	hasMembers := len(composites.Realm) > 0 || len(composites.Client) > 0
+	requested = hasMembers || (raw.Composite != nil && *raw.Composite)
+	return composites, requested
+}
+
 // removeFieldFromDefinition removes a field from a JSON definition.
 // If the field doesn't exist or the JSON is invalid, the original is returned unchanged.
 func removeFieldFromDefinition(definition json.RawMessage, field string) json.RawMessage {

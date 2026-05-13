@@ -102,10 +102,13 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		roleName = role.Name
 	}
 
-	// Prepare definition with name set
 	definition := setFieldInDefinition(role.Spec.Definition.Raw, "name", roleName)
 
-	// Check if this is a client role
+	// Composites are not honored by the role create/update endpoints; manage
+	// them via the dedicated composites endpoint after the role exists.
+	desiredComposites, compositesRequested := extractRoleComposites(definition)
+	definition = removeFieldFromDefinition(definition, "composites")
+
 	var clientUUID string
 	isClientRole := role.Spec.ClientRef != nil
 	if isClientRole {
@@ -118,10 +121,8 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	var roleID string
 	if isClientRole {
-		// Client role
 		existingRole, err := kc.GetClientRole(ctx, realmName, clientUUID, roleName)
 		if err != nil || existingRole == nil {
-			// Create client role
 			log.Info("creating client role", "name", roleName, "realm", realmName, "client", clientUUID)
 			roleID, err = kc.CreateClientRole(ctx, realmName, clientUUID, definition)
 			if err != nil {
@@ -130,7 +131,6 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			log.Info("client role created successfully", "name", roleName, "id", roleID)
 		} else {
-			// Update client role
 			roleID = *existingRole.ID
 			definition = mergeIDIntoDefinition(definition, existingRole.ID)
 			log.Info("updating client role", "name", roleName, "realm", realmName, "client", clientUUID)
@@ -141,10 +141,8 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			log.Info("client role updated successfully", "name", roleName)
 		}
 	} else {
-		// Realm role
 		existingRole, err := kc.GetRealmRole(ctx, realmName, roleName)
 		if err != nil || existingRole == nil {
-			// Create realm role
 			log.Info("creating realm role", "name", roleName, "realm", realmName)
 			roleID, err = kc.CreateRealmRole(ctx, realmName, definition)
 			if err != nil {
@@ -153,7 +151,6 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			log.Info("realm role created successfully", "name", roleName, "id", roleID)
 		} else {
-			// Update realm role
 			roleID = *existingRole.ID
 			definition = mergeIDIntoDefinition(definition, existingRole.ID)
 			log.Info("updating realm role", "name", roleName, "realm", realmName)
@@ -165,13 +162,139 @@ func (r *KeycloakRoleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Update status
+	if compositesRequested {
+		if err := r.syncRoleComposites(ctx, kc, realmName, roleName, isClientRole, clientUUID, desiredComposites); err != nil {
+			RecordError(controllerName, "keycloak_api_error")
+			return r.updateStatus(ctx, role, false, "CompositesFailed", fmt.Sprintf("Failed to sync role composites: %v", err), roleID, roleName, isClientRole, clientUUID)
+		}
+	}
+
 	if isClientRole {
 		role.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s/clients/%s/roles/%s", realmName, clientUUID, roleName)
 	} else {
 		role.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s/roles/%s", realmName, roleName)
 	}
 	return r.updateStatus(ctx, role, true, "Ready", "Role synchronized", roleID, roleName, isClientRole, clientUUID)
+}
+
+// syncRoleComposites diffs desired vs. existing composite members and applies
+// add/remove via the dedicated composites endpoints.
+func (r *KeycloakRoleReconciler) syncRoleComposites(
+	ctx context.Context,
+	kc *keycloak.Client,
+	realmName, roleName string,
+	isClientRole bool,
+	clientUUID string,
+	desired roleCompositesSpec,
+) error {
+	log := log.FromContext(ctx)
+
+	desiredRoles, err := resolveRoleComposites(ctx, kc, realmName, desired)
+	if err != nil {
+		return err
+	}
+
+	var existing []keycloak.RoleRepresentation
+	if isClientRole {
+		existing, err = kc.GetClientRoleComposites(ctx, realmName, clientUUID, roleName)
+	} else {
+		existing, err = kc.GetRealmRoleComposites(ctx, realmName, roleName)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to list existing composites: %w", err)
+	}
+
+	desiredIDs := make(map[string]keycloak.RoleRepresentation, len(desiredRoles))
+	for _, rr := range desiredRoles {
+		if rr.ID != nil && *rr.ID != "" {
+			desiredIDs[*rr.ID] = rr
+		}
+	}
+	existingIDs := make(map[string]keycloak.RoleRepresentation, len(existing))
+	for _, rr := range existing {
+		if rr.ID != nil && *rr.ID != "" {
+			existingIDs[*rr.ID] = rr
+		}
+	}
+
+	var toAdd, toRemove []keycloak.RoleRepresentation
+	for id, rr := range desiredIDs {
+		if _, ok := existingIDs[id]; !ok {
+			toAdd = append(toAdd, rr)
+		}
+	}
+	for id, rr := range existingIDs {
+		if _, ok := desiredIDs[id]; !ok {
+			toRemove = append(toRemove, rr)
+		}
+	}
+
+	if len(toAdd) > 0 {
+		log.Info("adding composite role members", "role", roleName, "count", len(toAdd))
+		if isClientRole {
+			if err := kc.AddClientRoleComposites(ctx, realmName, clientUUID, roleName, toAdd); err != nil {
+				return fmt.Errorf("failed to add composites: %w", err)
+			}
+		} else {
+			if err := kc.AddRealmRoleComposites(ctx, realmName, roleName, toAdd); err != nil {
+				return fmt.Errorf("failed to add composites: %w", err)
+			}
+		}
+	}
+	if len(toRemove) > 0 {
+		log.Info("removing composite role members", "role", roleName, "count", len(toRemove))
+		if isClientRole {
+			if err := kc.RemoveClientRoleComposites(ctx, realmName, clientUUID, roleName, toRemove); err != nil {
+				return fmt.Errorf("failed to remove composites: %w", err)
+			}
+		} else {
+			if err := kc.RemoveRealmRoleComposites(ctx, realmName, roleName, toRemove); err != nil {
+				return fmt.Errorf("failed to remove composites: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// resolveRoleComposites looks up the Keycloak RoleRepresentations (with IDs)
+// for the realm and client roles named in a composites spec.
+func resolveRoleComposites(
+	ctx context.Context,
+	kc *keycloak.Client,
+	realmName string,
+	desired roleCompositesSpec,
+) ([]keycloak.RoleRepresentation, error) {
+	resolved := make([]keycloak.RoleRepresentation, 0, len(desired.Realm))
+	for _, name := range desired.Realm {
+		if name == "" {
+			continue
+		}
+		rr, err := kc.GetRealmRole(ctx, realmName, name)
+		if err != nil || rr == nil {
+			return nil, fmt.Errorf("composite realm role %q not found in realm %q: %w", name, realmName, err)
+		}
+		resolved = append(resolved, *rr)
+	}
+	for clientID, names := range desired.Client {
+		if clientID == "" || len(names) == 0 {
+			continue
+		}
+		client, err := kc.GetClientByClientID(ctx, realmName, clientID)
+		if err != nil || client == nil || client.ID == nil {
+			return nil, fmt.Errorf("composite client %q not found in realm %q: %w", clientID, realmName, err)
+		}
+		for _, name := range names {
+			if name == "" {
+				continue
+			}
+			rr, err := kc.GetClientRole(ctx, realmName, *client.ID, name)
+			if err != nil || rr == nil {
+				return nil, fmt.Errorf("composite client role %q on client %q not found: %w", name, clientID, err)
+			}
+			resolved = append(resolved, *rr)
+		}
+	}
+	return resolved, nil
 }
 
 func (r *KeycloakRoleReconciler) getKeycloakClientAndRealm(ctx context.Context, role *keycloakv1beta1.KeycloakRole) (*keycloak.Client, string, error) {

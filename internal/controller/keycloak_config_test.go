@@ -428,6 +428,100 @@ func TestRemoveFieldFromDefinition(t *testing.T) {
 	}
 }
 
+func TestExtractRoleComposites(t *testing.T) {
+	tests := []struct {
+		name          string
+		definition    string
+		wantRequested bool
+		wantRealm     []string
+		wantClient    map[string][]string
+	}{
+		{
+			name:          "no composite fields",
+			definition:    `{"name":"my-role","description":"plain"}`,
+			wantRequested: false,
+		},
+		{
+			name:          "composite false with no members",
+			definition:    `{"name":"my-role","composite":false}`,
+			wantRequested: false,
+		},
+		{
+			name:          "composite true triggers handling even without members",
+			definition:    `{"name":"my-role","composite":true}`,
+			wantRequested: true,
+		},
+		{
+			name:          "members present without composite flag still triggers handling",
+			definition:    `{"name":"my-role","composites":{"realm":["base"]}}`,
+			wantRequested: true,
+			wantRealm:     []string{"base"},
+		},
+		{
+			name: "full composites block parsed",
+			definition: `{
+				"name": "admin-read",
+				"composite": true,
+				"composites": {
+					"realm": ["base-1", "base-2"],
+					"client": {
+						"realm-management": ["view-realm", "view-users"]
+					}
+				}
+			}`,
+			wantRequested: true,
+			wantRealm:     []string{"base-1", "base-2"},
+			wantClient:    map[string][]string{"realm-management": {"view-realm", "view-users"}},
+		},
+		{
+			name:          "invalid JSON returns no requested",
+			definition:    `{not-json`,
+			wantRequested: false,
+		},
+		{
+			name:          "empty definition",
+			definition:    ``,
+			wantRequested: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			composites, requested := extractRoleComposites(json.RawMessage(tt.definition))
+			if requested != tt.wantRequested {
+				t.Fatalf("requested = %v, want %v", requested, tt.wantRequested)
+			}
+			if len(composites.Realm) != len(tt.wantRealm) {
+				t.Fatalf("realm composites = %v, want %v", composites.Realm, tt.wantRealm)
+			}
+			for i, name := range tt.wantRealm {
+				if composites.Realm[i] != name {
+					t.Errorf("realm[%d] = %q, want %q", i, composites.Realm[i], name)
+				}
+			}
+			if len(composites.Client) != len(tt.wantClient) {
+				t.Fatalf("client composites = %v, want %v", composites.Client, tt.wantClient)
+			}
+			for clientID, names := range tt.wantClient {
+				got, ok := composites.Client[clientID]
+				if !ok {
+					t.Errorf("missing client %q in composites", clientID)
+					continue
+				}
+				if len(got) != len(names) {
+					t.Errorf("client %q roles = %v, want %v", clientID, got, names)
+					continue
+				}
+				for i, name := range names {
+					if got[i] != name {
+						t.Errorf("client %q role[%d] = %q, want %q", clientID, i, got[i], name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestResolveFlowBindingAliases(t *testing.T) {
 	ctx := context.Background()
 	realmName := "test-realm"
