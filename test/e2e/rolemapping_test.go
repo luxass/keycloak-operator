@@ -405,6 +405,198 @@ func TestKeycloakRoleMappingCleanup(t *testing.T) {
 	})
 }
 
+// TestKeycloakRoleMappingRoleRefE2E covers the roleRef code path, where the
+// mapping points at an operator-managed KeycloakRole instead of an inline role
+// name. The client-role subtest also exercises the transitive lookup from the
+// referenced KeycloakRole to its own clientRef.
+func TestKeycloakRoleMappingRoleRefE2E(t *testing.T) {
+	skipIfNoCluster(t)
+
+	instanceName, instanceNS := getOrCreateInstance(t)
+	realmName := createTestRealm(t, instanceName, instanceNS, "rolemapping-roleref")
+
+	t.Run("RealmRoleViaRoleRef", func(t *testing.T) {
+		userName := fmt.Sprintf("roleref-user-%d", time.Now().UnixNano())
+		userDef := rawJSON(fmt.Sprintf(`{
+			"username": "%s",
+			"enabled": true
+		}`, userName))
+		kcUser := &keycloakv1beta1.KeycloakUser{
+			ObjectMeta: metav1.ObjectMeta{Name: userName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakUserSpec{
+				RealmRef:   &keycloakv1beta1.ResourceRef{Name: realmName},
+				Definition: &userDef,
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, kcUser))
+		t.Cleanup(func() { k8sClient.Delete(ctx, kcUser) })
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakUser{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: kcUser.Name, Namespace: kcUser.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "KeycloakUser did not become ready")
+
+		roleName := fmt.Sprintf("roleref-realm-role-%d", time.Now().UnixNano())
+		role := &keycloakv1beta1.KeycloakRole{
+			ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRoleSpec{
+				RealmRef:   &keycloakv1beta1.ResourceRef{Name: realmName},
+				Definition: rawJSON(fmt.Sprintf(`{"name":"%s"}`, roleName)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, role))
+		t.Cleanup(func() { k8sClient.Delete(ctx, role) })
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRole{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: role.Name, Namespace: role.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready && updated.Status.RoleName != "", nil
+		})
+		require.NoError(t, err, "KeycloakRole did not become ready")
+
+		mappingName := fmt.Sprintf("roleref-realm-mapping-%d", time.Now().UnixNano())
+		mapping := &keycloakv1beta1.KeycloakRoleMapping{
+			ObjectMeta: metav1.ObjectMeta{Name: mappingName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRoleMappingSpec{
+				Subject: keycloakv1beta1.RoleMappingSubject{
+					UserRef: &keycloakv1beta1.ResourceRef{Name: userName},
+				},
+				RoleRef: &keycloakv1beta1.ResourceRef{Name: roleName},
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, mapping))
+		t.Cleanup(func() { k8sClient.Delete(ctx, mapping) })
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRoleMapping{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: mapping.Name, Namespace: mapping.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "KeycloakRoleMapping via roleRef did not become ready")
+
+		updated := &keycloakv1beta1.KeycloakRoleMapping{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: mapping.Name, Namespace: mapping.Namespace}, updated))
+		require.Equal(t, "Ready", updated.Status.Status)
+		require.Equal(t, "user", updated.Status.SubjectType)
+		require.Equal(t, "realm", updated.Status.RoleType)
+		require.Equal(t, roleName, updated.Status.RoleName)
+		requireReadyCondition(t, updated.Status.Conditions, metav1.ConditionTrue)
+		t.Logf("Realm role via roleRef mapping %s is ready", mappingName)
+	})
+
+	t.Run("ClientRoleViaRoleRef", func(t *testing.T) {
+		// Exercises the new transitive lookup: KeycloakRole has its own clientRef,
+		// so the mapping must follow it and resolve the client UUID.
+		clientName := fmt.Sprintf("roleref-client-%d", time.Now().UnixNano())
+		clientDef := rawJSON(fmt.Sprintf(`{
+			"clientId": "%s",
+			"enabled": true
+		}`, clientName))
+		kcClient := &keycloakv1beta1.KeycloakClient{
+			ObjectMeta: metav1.ObjectMeta{Name: clientName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakClientSpec{
+				RealmRef:   &keycloakv1beta1.ResourceRef{Name: realmName},
+				Definition: &clientDef,
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, kcClient))
+		t.Cleanup(func() { k8sClient.Delete(ctx, kcClient) })
+
+		err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakClient{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: kcClient.Name, Namespace: kcClient.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready && updated.Status.ClientUUID != "", nil
+		})
+		require.NoError(t, err, "KeycloakClient did not become ready")
+
+		roleName := fmt.Sprintf("roleref-client-role-%d", time.Now().UnixNano())
+		role := &keycloakv1beta1.KeycloakRole{
+			ObjectMeta: metav1.ObjectMeta{Name: roleName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRoleSpec{
+				RealmRef:   &keycloakv1beta1.ResourceRef{Name: realmName},
+				ClientRef:  &keycloakv1beta1.ResourceRef{Name: clientName},
+				Definition: rawJSON(fmt.Sprintf(`{"name":"%s"}`, roleName)),
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, role))
+		t.Cleanup(func() { k8sClient.Delete(ctx, role) })
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRole{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: role.Name, Namespace: role.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready && updated.Status.RoleName != "", nil
+		})
+		require.NoError(t, err, "KeycloakRole (client-scoped) did not become ready")
+
+		userName := fmt.Sprintf("roleref-client-user-%d", time.Now().UnixNano())
+		userDef := rawJSON(fmt.Sprintf(`{
+			"username": "%s",
+			"enabled": true
+		}`, userName))
+		kcUser := &keycloakv1beta1.KeycloakUser{
+			ObjectMeta: metav1.ObjectMeta{Name: userName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakUserSpec{
+				RealmRef:   &keycloakv1beta1.ResourceRef{Name: realmName},
+				Definition: &userDef,
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, kcUser))
+		t.Cleanup(func() { k8sClient.Delete(ctx, kcUser) })
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakUser{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: kcUser.Name, Namespace: kcUser.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "KeycloakUser did not become ready")
+
+		mappingName := fmt.Sprintf("roleref-client-mapping-%d", time.Now().UnixNano())
+		mapping := &keycloakv1beta1.KeycloakRoleMapping{
+			ObjectMeta: metav1.ObjectMeta{Name: mappingName, Namespace: testNamespace},
+			Spec: keycloakv1beta1.KeycloakRoleMappingSpec{
+				Subject: keycloakv1beta1.RoleMappingSubject{
+					UserRef: &keycloakv1beta1.ResourceRef{Name: userName},
+				},
+				RoleRef: &keycloakv1beta1.ResourceRef{Name: roleName},
+			},
+		}
+		require.NoError(t, k8sClient.Create(ctx, mapping))
+		t.Cleanup(func() { k8sClient.Delete(ctx, mapping) })
+
+		err = wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+			updated := &keycloakv1beta1.KeycloakRoleMapping{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: mapping.Name, Namespace: mapping.Namespace}, updated); err != nil {
+				return false, nil
+			}
+			return updated.Status.Ready, nil
+		})
+		require.NoError(t, err, "Client role via roleRef mapping did not become ready")
+
+		updated := &keycloakv1beta1.KeycloakRoleMapping{}
+		require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: mapping.Name, Namespace: mapping.Namespace}, updated))
+		require.Equal(t, "Ready", updated.Status.Status)
+		require.Equal(t, "user", updated.Status.SubjectType)
+		require.Equal(t, "client", updated.Status.RoleType)
+		require.Equal(t, roleName, updated.Status.RoleName)
+		requireReadyCondition(t, updated.Status.Conditions, metav1.ConditionTrue)
+		t.Logf("Client role via roleRef mapping %s is ready", mappingName)
+	})
+}
+
 func TestKeycloakClientRoleMapping(t *testing.T) {
 	skipIfNoCluster(t)
 
