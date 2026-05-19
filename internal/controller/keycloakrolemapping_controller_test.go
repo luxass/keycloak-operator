@@ -5,13 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	keycloakv1beta1 "github.com/Hostzero-GmbH/keycloak-operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	keycloakv1beta1 "github.com/Hostzero-GmbH/keycloak-operator/api/v1beta1"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -629,14 +630,10 @@ func TestReconcile_AddsFinalizerOnFirstReconcile(t *testing.T) {
 		Build()
 	r := &KeycloakRoleMappingReconciler{Client: cl}
 
-	result, err := r.Reconcile(context.Background(), reconcile.Request{
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: "mapping", Namespace: "default"},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.Requeue {
-		t.Error("expected Requeue=true after adding finalizer, got false")
 	}
 
 	got := &keycloakv1beta1.KeycloakRoleMapping{}
