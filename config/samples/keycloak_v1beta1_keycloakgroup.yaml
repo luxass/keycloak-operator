@@ -1,0 +1,12 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakGroup
+metadata:
+  name: example-group
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    name: administrators
+    attributes:
+      department: ["platform"]

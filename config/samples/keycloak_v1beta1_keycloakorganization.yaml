@@ -1,0 +1,16 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakOrganization
+metadata:
+  name: example-organization
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    name: acme
+    alias: acme
+    description: "ACME Corporation tenant"
+    enabled: true
+    domains:
+      - name: acme.example.com
+        verified: false

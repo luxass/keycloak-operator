@@ -336,6 +336,9 @@ bundle: manifests kustomize operator-sdk ## Generate the OLM bundle under bundle
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS) --package=$(BUNDLE_PACKAGE)
 	# Restore the dev image reference in config/manager so local builds aren't affected.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=keycloak-operator:dev
+	# OperatorHub's pipeline requires metadata.annotations.containerImage to match the
+	# image referenced in the deployment. operator-sdk doesn't set it on its own.
+	OPERATOR_IMG=$(OPERATOR_IMG) yq -i '.metadata.annotations.containerImage = strenv(OPERATOR_IMG)' bundle/manifests/hostzero-keycloak-operator.clusterserviceversion.yaml
 	$(OPERATOR_SDK) bundle validate ./bundle
 
 .PHONY: bundle-build

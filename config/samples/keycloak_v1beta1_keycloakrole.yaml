@@ -1,0 +1,11 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakRole
+metadata:
+  name: example-realm-admin-role
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    name: admin
+    description: "Realm-level administrator role"

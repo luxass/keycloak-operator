@@ -1,0 +1,15 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakClientScope
+metadata:
+  name: example-client-scope
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    name: groups
+    description: "Includes group memberships in the access token"
+    protocol: openid-connect
+    attributes:
+      include.in.token.scope: "true"
+      display.on.consent.screen: "true"

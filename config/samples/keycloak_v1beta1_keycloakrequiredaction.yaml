@@ -1,0 +1,15 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakRequiredAction
+metadata:
+  name: example-configure-otp
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    alias: CONFIGURE_TOTP
+    name: "Configure OTP"
+    providerId: CONFIGURE_TOTP
+    enabled: true
+    defaultAction: false
+    priority: 10

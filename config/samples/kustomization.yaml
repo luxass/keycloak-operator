@@ -1,8 +1,21 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-- keycloak_v1beta1_keycloakinstance.yaml
-- keycloak_v1beta1_keycloakrealm.yaml
+- keycloak_v1beta1_clusterkeycloakinstance.yaml
+- keycloak_v1beta1_clusterkeycloakrealm.yaml
+- keycloak_v1beta1_keycloakauthenticationflow.yaml
 - keycloak_v1beta1_keycloakclient.yaml
-- keycloak_v1beta1_keycloakuser.yaml
+- keycloak_v1beta1_keycloakclientscope.yaml
+- keycloak_v1beta1_keycloakcomponent.yaml
+- keycloak_v1beta1_keycloakgroup.yaml
+- keycloak_v1beta1_keycloakidentityprovider.yaml
 - keycloak_v1beta1_keycloakidentityprovidermapper.yaml
+- keycloak_v1beta1_keycloakinstance.yaml
+- keycloak_v1beta1_keycloakorganization.yaml
+- keycloak_v1beta1_keycloakprotocolmapper.yaml
+- keycloak_v1beta1_keycloakrealm.yaml
+- keycloak_v1beta1_keycloakrequiredaction.yaml
+- keycloak_v1beta1_keycloakrole.yaml
+- keycloak_v1beta1_keycloakrolemapping.yaml
+- keycloak_v1beta1_keycloakuser.yaml
+- keycloak_v1beta1_keycloakusercredential.yaml

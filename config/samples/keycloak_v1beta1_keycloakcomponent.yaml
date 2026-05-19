@@ -1,0 +1,19 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakComponent
+metadata:
+  name: example-ldap-federation
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  definition:
+    name: ldap
+    providerId: ldap
+    providerType: org.keycloak.storage.UserStorageProvider
+    config:
+      enabled: ["true"]
+      priority: ["1"]
+      vendor: ["ad"]
+      connectionUrl: ["ldap://ldap.example.com:389"]
+      usersDn: ["ou=users,dc=example,dc=com"]
+      bindDn: ["cn=admin,dc=example,dc=com"]

@@ -1,0 +1,21 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakAuthenticationFlow
+metadata:
+  name: example-browser-flow
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  alias: custom-browser
+  providerId: basic-flow
+  description: "Customised browser authentication flow"
+  executions:
+    - authenticator: auth-cookie
+      requirement: ALTERNATIVE
+    - subFlow:
+        alias: custom-browser-forms
+        providerId: basic-flow
+      requirement: ALTERNATIVE
+      executions:
+        - authenticator: auth-username-password-form
+          requirement: REQUIRED

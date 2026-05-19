@@ -1,0 +1,11 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakRoleMapping
+metadata:
+  name: example-admin-binding
+  namespace: default
+spec:
+  subject:
+    userRef:
+      name: example-user
+  roleRef:
+    name: example-realm-admin-role

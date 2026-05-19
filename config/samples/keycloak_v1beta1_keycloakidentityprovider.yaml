@@ -1,0 +1,19 @@
+apiVersion: keycloak.hostzero.com/v1beta1
+kind: KeycloakIdentityProvider
+metadata:
+  name: example-google-idp
+  namespace: default
+spec:
+  realmRef:
+    name: example-realm
+  configSecretRef:
+    name: google-idp-credentials
+  definition:
+    alias: google
+    providerId: google
+    enabled: true
+    trustEmail: true
+    storeToken: false
+    addReadTokenRoleOnCreate: false
+    config:
+      syncMode: IMPORT
