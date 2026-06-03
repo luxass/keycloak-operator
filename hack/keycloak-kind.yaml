@@ -37,6 +37,11 @@ spec:
           image: quay.io/keycloak/keycloak:26.0
           args:
             - start-dev
+            # Legacy (V1) token exchange and the IdP management/permissions
+            # endpoint require these preview features; without them the
+            # endpoint returns 500. admin-fine-grained-authz is V1 here because
+            # the image is pinned to 26.0 (the :v1 suffix only exists in 26.2+).
+            - --features=admin-fine-grained-authz,token-exchange
           env:
             - name: KEYCLOAK_ADMIN
               valueFrom:

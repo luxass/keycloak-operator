@@ -35,7 +35,7 @@ func TestKeycloakInstanceTLSE2E(t *testing.T) {
 		instance := &keycloakv1beta1.KeycloakInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: instanceName, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakInstanceSpec{
-				BaseUrl: getKeycloakURL(),
+				BaseUrl: getKeycloakInternalURL(),
 				Auth: keycloakv1beta1.AuthSpec{
 					PasswordGrant: &keycloakv1beta1.PasswordGrantSpec{
 						SecretRef: keycloakv1beta1.PasswordGrantSecretRefSpec{Name: secretName},
@@ -86,7 +86,7 @@ func TestKeycloakInstanceTLSE2E(t *testing.T) {
 		instance := &keycloakv1beta1.KeycloakInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: instanceName, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakInstanceSpec{
-				BaseUrl: getKeycloakURL(),
+				BaseUrl: getKeycloakInternalURL(),
 				Auth: keycloakv1beta1.AuthSpec{
 					PasswordGrant: &keycloakv1beta1.PasswordGrantSpec{
 						SecretRef: keycloakv1beta1.PasswordGrantSecretRefSpec{Name: secretName},
@@ -129,7 +129,7 @@ func TestKeycloakInstanceTLSE2E(t *testing.T) {
 		instance := &keycloakv1beta1.KeycloakInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: instanceName, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakInstanceSpec{
-				BaseUrl: getKeycloakURL(),
+				BaseUrl: getKeycloakInternalURL(),
 				Auth: keycloakv1beta1.AuthSpec{
 					PasswordGrant: &keycloakv1beta1.PasswordGrantSpec{
 						SecretRef: keycloakv1beta1.PasswordGrantSecretRefSpec{Name: secretName},
@@ -170,7 +170,7 @@ func TestKeycloakInstanceTLSE2E(t *testing.T) {
 		instance := &keycloakv1beta1.KeycloakInstance{
 			ObjectMeta: metav1.ObjectMeta{Name: instanceName, Namespace: testNamespace},
 			Spec: keycloakv1beta1.KeycloakInstanceSpec{
-				BaseUrl: getKeycloakURL(),
+				BaseUrl: getKeycloakInternalURL(),
 				Auth: keycloakv1beta1.AuthSpec{
 					PasswordGrant: &keycloakv1beta1.PasswordGrantSpec{
 						SecretRef: keycloakv1beta1.PasswordGrantSecretRefSpec{Name: secretName},

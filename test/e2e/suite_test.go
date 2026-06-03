@@ -212,15 +212,6 @@ func createTestInstance(t *testing.T) string {
 		require.NoError(t, err)
 	}
 
-	// Determine Keycloak URL for the operator (always use in-cluster URL)
-	// KEYCLOAK_INTERNAL_URL is what the operator uses (must be reachable from inside the cluster)
-	// KEYCLOAK_URL is what tests use for direct access (can be port-forwarded localhost)
-	keycloakInternalURL := os.Getenv("KEYCLOAK_INTERNAL_URL")
-	if keycloakInternalURL == "" {
-		// Default to in-cluster service URL
-		keycloakInternalURL = "http://keycloak.keycloak.svc.cluster.local"
-	}
-
 	// Create KeycloakInstance
 	instance := &keycloakv1beta1.KeycloakInstance{
 		ObjectMeta: metav1.ObjectMeta{
@@ -228,7 +219,7 @@ func createTestInstance(t *testing.T) string {
 			Namespace: testNamespace,
 		},
 		Spec: keycloakv1beta1.KeycloakInstanceSpec{
-			BaseUrl: keycloakInternalURL,
+			BaseUrl: getKeycloakInternalURL(),
 			Auth: keycloakv1beta1.AuthSpec{
 				PasswordGrant: &keycloakv1beta1.PasswordGrantSpec{
 					SecretRef: keycloakv1beta1.PasswordGrantSecretRefSpec{

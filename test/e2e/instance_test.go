@@ -178,9 +178,20 @@ func TestKeycloakInstanceE2E(t *testing.T) {
 	})
 }
 
-// getKeycloakURL returns the Keycloak URL for tests
+// getKeycloakURL returns the Keycloak URL for direct test access (port-forwarded).
 func getKeycloakURL() string {
 	if url := os.Getenv("KEYCLOAK_URL"); url != "" {
+		return url
+	}
+	return "http://keycloak.keycloak.svc.cluster.local"
+}
+
+// getKeycloakInternalURL returns the URL the in-cluster operator uses to reach
+// Keycloak. This differs from getKeycloakURL, which may be a port-forwarded
+// localhost address unreachable from inside the cluster. Any KeycloakInstance
+// created by a test must use this for its baseUrl.
+func getKeycloakInternalURL() string {
+	if url := os.Getenv("KEYCLOAK_INTERNAL_URL"); url != "" {
 		return url
 	}
 	return "http://keycloak.keycloak.svc.cluster.local"
