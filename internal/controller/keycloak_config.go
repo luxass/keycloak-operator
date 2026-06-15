@@ -720,6 +720,42 @@ func realmDefinitionsMatch(desired, current json.RawMessage) bool {
 	return definitionsMatch(desiredJSON, currentJSON)
 }
 
+// organizationDefinitionsMatch reports whether desired matches current,
+// ignoring domains[].verified which Keycloak sets on read.
+func organizationDefinitionsMatch(desired, current json.RawMessage) bool {
+	var desiredMap, currentMap map[string]interface{}
+	if err := json.Unmarshal(desired, &desiredMap); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(current, &currentMap); err != nil {
+		return false
+	}
+
+	stripDomainVerified := func(m map[string]interface{}) {
+		domains, ok := m["domains"].([]interface{})
+		if !ok {
+			return
+		}
+		for _, d := range domains {
+			if dm, ok := d.(map[string]interface{}); ok {
+				delete(dm, "verified")
+			}
+		}
+	}
+	stripDomainVerified(desiredMap)
+	stripDomainVerified(currentMap)
+
+	desiredJSON, err := json.Marshal(desiredMap)
+	if err != nil {
+		return false
+	}
+	currentJSON, err := json.Marshal(currentMap)
+	if err != nil {
+		return false
+	}
+	return definitionsMatch(desiredJSON, currentJSON)
+}
+
 // roleCompositesSpec mirrors the "composites" field of a Keycloak
 // RoleRepresentation: realm roles by name and client roles keyed by clientId.
 type roleCompositesSpec struct {

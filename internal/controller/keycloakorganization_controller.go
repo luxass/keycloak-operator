@@ -140,16 +140,28 @@ func (r *KeycloakOrganizationReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		log.Info("organization created successfully", "name", orgDef.Name, "id", orgID)
 	} else {
-		// Organization exists, update it
+		// Skip the PUT when the server already matches the spec.
 		orgID = existingOrg.ID
 		orgDef.ID = orgID
 
-		log.Info("updating organization", "name", orgDef.Name, "realm", realmName)
-		if err := kc.UpdateOrganization(ctx, realmName, orgDef); err != nil {
-			RecordError(controllerName, "keycloak_api_error")
-			return r.updateStatus(ctx, org, false, "UpdateFailed", fmt.Sprintf("Failed to update organization: %v", err), orgID)
+		currentRaw, fetchErr := kc.GetOrganizationRaw(ctx, realmName, orgID)
+		needsUpdate := true
+		if fetchErr != nil {
+			log.Error(fetchErr, "failed to fetch current organization state, falling through to update")
+		} else if currentRaw != nil {
+			needsUpdate = !organizationDefinitionsMatch(org.Spec.Definition.Raw, currentRaw)
 		}
-		log.Info("organization updated successfully", "name", orgDef.Name)
+
+		if needsUpdate {
+			log.Info("updating organization", "name", orgDef.Name, "realm", realmName)
+			if err := kc.UpdateOrganization(ctx, realmName, orgDef); err != nil {
+				RecordError(controllerName, "keycloak_api_error")
+				return r.updateStatus(ctx, org, false, "UpdateFailed", fmt.Sprintf("Failed to update organization: %v", err), orgID)
+			}
+			log.Info("organization updated successfully", "name", orgDef.Name)
+		} else {
+			log.V(1).Info("organization already in sync, skipping update", "name", orgDef.Name)
+		}
 	}
 
 	// Update status

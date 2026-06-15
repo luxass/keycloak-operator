@@ -894,3 +894,36 @@ func TestRealmDefinitionsMatch_NonSmtpFieldDiff(t *testing.T) {
 		t.Error("expected no match: displayName differs")
 	}
 }
+
+func TestOrganizationDefinitionsMatch_DomainsVerifiedIgnored(t *testing.T) {
+	// Keycloak echoes domains[].verified on read. The CR cannot set it,
+	// so the diff must treat it as equal.
+	desired := json.RawMessage(`{"name":"acme","domains":[{"name":"acme.com"}]}`)
+	current := json.RawMessage(`{"id":"x","name":"acme","alias":"acme","enabled":true,"domains":[{"name":"acme.com","verified":true}]}`)
+
+	if !organizationDefinitionsMatch(desired, current) {
+		t.Error("expected match: server-set domains[].verified and current-only fields must not cause drift")
+	}
+}
+
+func TestOrganizationDefinitionsMatch_FieldDiff(t *testing.T) {
+	// A real field change must still surface as drift.
+	desired := json.RawMessage(`{"name":"acme","description":"new","domains":[{"name":"acme.com"}]}`)
+	current := json.RawMessage(`{"id":"x","name":"acme","description":"old","domains":[{"name":"acme.com","verified":false}]}`)
+
+	if organizationDefinitionsMatch(desired, current) {
+		t.Error("expected no match: description differs")
+	}
+}
+
+func TestOrganizationDefinitionsMatch_RedirectUrlDrift(t *testing.T) {
+	// redirectUrl exists on Keycloak 26's OrganizationRepresentation but is not
+	// modelled by the operator's struct. The raw-bytes diff must still detect
+	// drift when current omits a value the user set in spec.
+	desired := json.RawMessage(`{"name":"acme","redirectUrl":"https://app/cb","domains":[{"name":"acme.com"}]}`)
+	current := json.RawMessage(`{"id":"x","name":"acme","domains":[{"name":"acme.com","verified":false}]}`)
+
+	if organizationDefinitionsMatch(desired, current) {
+		t.Error("expected no match: desired redirectUrl missing from current")
+	}
+}
