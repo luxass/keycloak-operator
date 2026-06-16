@@ -19,6 +19,18 @@ import (
 	"github.com/Hostzero-GmbH/keycloak-operator/internal/keycloak"
 )
 
+const (
+	userProfileProviderType          = "org.keycloak.userprofile.UserProfileProvider"
+	declarativeUserProfileProviderID = "declarative-user-profile"
+)
+
+type componentIdentity struct {
+	Name         string
+	ProviderID   string
+	ProviderType string
+	ParentID     string
+}
+
 // KeycloakComponentReconciler reconciles a KeycloakComponent object
 type KeycloakComponentReconciler struct {
 	client.Client
@@ -87,9 +99,10 @@ func (r *KeycloakComponentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return r.updateStatus(ctx, component, false, "RealmNotReady", err.Error(), "", "", "")
 	}
 
-	// Parse component definition to extract name and providerType
+	// Parse component definition to extract identity fields
 	var componentDef struct {
 		Name         string `json:"name"`
+		ProviderID   string `json:"providerId"`
 		ProviderType string `json:"providerType"`
 		ParentID     string `json:"parentId"`
 	}
@@ -108,23 +121,19 @@ func (r *KeycloakComponentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Set parent ID to realm ID if not specified
 	if componentDef.ParentID == "" {
+		componentDef.ParentID = realmID
 		definition = setFieldInDefinition(definition, "parentId", realmID)
 	}
 
-	// Find existing component by name and provider type
-	var componentID string
-	existingComponents, err := kc.GetComponents(ctx, realmName, map[string]string{
-		"name": componentDef.Name,
+	componentID, err := r.findExistingComponentID(ctx, kc, realmName, componentIdentity{
+		Name:         componentDef.Name,
+		ProviderID:   componentDef.ProviderID,
+		ProviderType: componentDef.ProviderType,
+		ParentID:     componentDef.ParentID,
 	})
-	if err == nil {
-		for _, c := range existingComponents {
-			if c.Name != nil && *c.Name == componentDef.Name &&
-				c.ProviderType != nil && componentDef.ProviderType != "" &&
-				*c.ProviderType == componentDef.ProviderType {
-				componentID = *c.ID
-				break
-			}
-		}
+	if err != nil {
+		RecordError(controllerName, "component_lookup_error")
+		return r.updateStatus(ctx, component, false, "LookupFailed", err.Error(), "", componentDef.Name, componentDef.ProviderType)
 	}
 
 	if componentID == "" {
@@ -150,6 +159,26 @@ func (r *KeycloakComponentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Update status
 	component.Status.ResourcePath = fmt.Sprintf("/admin/realms/%s/components/%s", realmName, componentID)
 	return r.updateStatus(ctx, component, true, "Ready", "Component synchronized", componentID, componentDef.Name, componentDef.ProviderType)
+}
+
+func (r *KeycloakComponentReconciler) findExistingComponentID(ctx context.Context, kc *keycloak.Client, realmName string, desired componentIdentity) (string, error) {
+	components, err := kc.GetComponents(ctx, realmName, map[string]string{"name": desired.Name})
+	if err != nil {
+		return "", err
+	}
+	return findMatchingComponentID(components, desired)
+}
+
+func findMatchingComponentID(components []keycloak.ComponentRepresentation, desired componentIdentity) (string, error) {
+	for _, c := range components {
+		if c.ID == nil || c.Name == nil || c.ProviderType == nil {
+			continue
+		}
+		if *c.Name == desired.Name && desired.ProviderType != "" && *c.ProviderType == desired.ProviderType {
+			return *c.ID, nil
+		}
+	}
+	return "", nil
 }
 
 func (r *KeycloakComponentReconciler) getKeycloakClientAndRealm(ctx context.Context, component *keycloakv1beta1.KeycloakComponent) (*keycloak.Client, string, string, error) {
