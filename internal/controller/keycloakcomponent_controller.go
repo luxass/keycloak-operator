@@ -20,6 +20,10 @@ import (
 )
 
 const (
+	// Keycloak stores per-realm user profile configuration as a ComponentModel
+	// using this provider type/provider ID pair. Components created through the
+	// dedicated /users/profile Admin API may be unnamed, so name-based adoption
+	// alone is not reliable for this provider.
 	userProfileProviderType          = "org.keycloak.userprofile.UserProfileProvider"
 	declarativeUserProfileProviderID = "declarative-user-profile"
 )
@@ -125,6 +129,10 @@ func (r *KeycloakComponentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		definition = setFieldInDefinition(definition, "parentId", realmID)
 	}
 
+	// Resolve an existing Keycloak component before deciding whether to create
+	// one. Most component types are identified well enough by name+providerType.
+	// Declarative user-profile components need a fallback because Keycloak may
+	// create them through the User Profile UI/API without a name.
 	componentID, err := r.findExistingComponentID(ctx, kc, realmName, componentIdentity{
 		Name:         componentDef.Name,
 		ProviderID:   componentDef.ProviderID,
@@ -161,8 +169,40 @@ func (r *KeycloakComponentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return r.updateStatus(ctx, component, true, "Ready", "Component synchronized", componentID, componentDef.Name, componentDef.ProviderType)
 }
 
+// findExistingComponentID returns the Keycloak ID of the component represented
+// by the CR, or an empty string when it does not exist yet.
+//
+// The normal component identity used by this controller is name+providerType.
+// That keeps existing behavior for generic components such as keys and LDAP.
+//
+// A special fallback is needed for declarative user-profile components. When a
+// user saves Realm settings -> User profile in the Keycloak Admin UI (or calls
+// PUT /admin/realms/{realm}/users/profile), Keycloak persists the configuration
+// as a ComponentModel with providerId=declarative-user-profile and
+// providerType=org.keycloak.userprofile.UserProfileProvider, but the component
+// can be unnamed. Matching by provider identity plus parent realm lets the
+// operator adopt that existing component instead of creating a duplicate.
 func (r *KeycloakComponentReconciler) findExistingComponentID(ctx context.Context, kc *keycloak.Client, realmName string, desired componentIdentity) (string, error) {
+	// Fast path and backwards-compatible behavior: find components by the
+	// configured name, then require providerType to match before adopting it.
 	components, err := kc.GetComponents(ctx, realmName, map[string]string{"name": desired.Name})
+	if err != nil {
+		return "", err
+	}
+	componentID, err := findMatchingComponentID(components, desired)
+	if err != nil || componentID != "" {
+		return componentID, err
+	}
+
+	if desired.ProviderID != declarativeUserProfileProviderID || desired.ProviderType != userProfileProviderType {
+		return "", nil
+	}
+
+	// User-profile fallback: query all user-profile components in the realm and
+	// match the exact provider identity under this realm's parent ID. This is
+	// intentionally narrow to avoid changing matching semantics for other
+	// component types that may legitimately have repeated provider IDs.
+	components, err = kc.GetComponents(ctx, realmName, map[string]string{"type": desired.ProviderType})
 	if err != nil {
 		return "", err
 	}
@@ -178,7 +218,29 @@ func findMatchingComponentID(components []keycloak.ComponentRepresentation, desi
 			return *c.ID, nil
 		}
 	}
-	return "", nil
+
+	if desired.ProviderID != declarativeUserProfileProviderID || desired.ProviderType != userProfileProviderType {
+		return "", nil
+	}
+
+	var matches []string
+	for _, c := range components {
+		if c.ID == nil || c.ProviderID == nil || c.ProviderType == nil || c.ParentID == nil {
+			continue
+		}
+		if *c.ProviderID == desired.ProviderID && *c.ProviderType == desired.ProviderType && *c.ParentID == desired.ParentID {
+			matches = append(matches, *c.ID)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", nil
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("multiple matching user profile components found for providerId=%q providerType=%q parentId=%q", desired.ProviderID, desired.ProviderType, desired.ParentID)
+	}
 }
 
 func (r *KeycloakComponentReconciler) getKeycloakClientAndRealm(ctx context.Context, component *keycloakv1beta1.KeycloakComponent) (*keycloak.Client, string, string, error) {
