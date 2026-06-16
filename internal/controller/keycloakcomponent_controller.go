@@ -210,19 +210,34 @@ func (r *KeycloakComponentReconciler) findExistingComponentID(ctx context.Contex
 }
 
 func findMatchingComponentID(components []keycloak.ComponentRepresentation, desired componentIdentity) (string, error) {
+	if componentID := findComponentByNameAndProviderType(components, desired); componentID != "" {
+		return componentID, nil
+	}
+
+	if !desired.isDeclarativeUserProfile() {
+		return "", nil
+	}
+
+	return findDeclarativeUserProfileComponent(components, desired)
+}
+
+func findComponentByNameAndProviderType(components []keycloak.ComponentRepresentation, desired componentIdentity) string {
+	if desired.Name == "" || desired.ProviderType == "" {
+		return ""
+	}
+
 	for _, c := range components {
 		if c.ID == nil || c.Name == nil || c.ProviderType == nil {
 			continue
 		}
-		if *c.Name == desired.Name && desired.ProviderType != "" && *c.ProviderType == desired.ProviderType {
-			return *c.ID, nil
+		if *c.Name == desired.Name && *c.ProviderType == desired.ProviderType {
+			return *c.ID
 		}
 	}
+	return ""
+}
 
-	if desired.ProviderID != declarativeUserProfileProviderID || desired.ProviderType != userProfileProviderType {
-		return "", nil
-	}
-
+func findDeclarativeUserProfileComponent(components []keycloak.ComponentRepresentation, desired componentIdentity) (string, error) {
 	var matches []string
 	for _, c := range components {
 		if c.ID == nil || c.ProviderID == nil || c.ProviderType == nil || c.ParentID == nil {
@@ -241,6 +256,10 @@ func findMatchingComponentID(components []keycloak.ComponentRepresentation, desi
 	default:
 		return "", fmt.Errorf("multiple matching user profile components found for providerId=%q providerType=%q parentId=%q", desired.ProviderID, desired.ProviderType, desired.ParentID)
 	}
+}
+
+func (c componentIdentity) isDeclarativeUserProfile() bool {
+	return c.ProviderID == declarativeUserProfileProviderID && c.ProviderType == userProfileProviderType
 }
 
 func (r *KeycloakComponentReconciler) getKeycloakClientAndRealm(ctx context.Context, component *keycloakv1beta1.KeycloakComponent) (*keycloak.Client, string, string, error) {
